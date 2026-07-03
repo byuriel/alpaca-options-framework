@@ -46,6 +46,7 @@ from feeds import FeedManager
 from momentum import MomentumEngine, Bar
 from orders import OrderManager
 from risk import RiskManager
+from orb_filter import ORBFilter
 from signals import check_entry
 from state import BotState, Position
 from strikes import startup_atr, compute_dynamic_strikes
@@ -69,6 +70,7 @@ momentum_engine = MomentumEngine()
 bot_state       = BotState()
 risk_manager    = RiskManager()
 order_manager   = OrderManager()
+orb_filter      = ORBFilter()
 
 _entry_lock: asyncio.Lock = asyncio.Lock()
 
@@ -131,6 +133,10 @@ async def on_spy_bar(bar):
     # Tick cooldown counter
     risk_manager.tick_bar()
 
+    # ORB filter — update on every bar (records only the first bar of each hour)
+    bar_time = b.t.astimezone(config.ET).time()
+    orb_filter.on_bar(bar_time, b.high, b.low)
+
     # Fire market-open event on first RTH bar (≥ 09:30 ET)
     bar_time = b.t.astimezone(config.ET).time()
     if not _market_open_event.is_set() and bar_time >= datetime.time(9, 30):
@@ -165,7 +171,7 @@ async def on_spy_bar(bar):
     pos = bot_state.position
     logger.info(
         "BAR | SPY=%.2f | %s | EMA5=%.2f EMA20=%.2f | VWAP=%.2f | ROC=%.4f | "
-        "consec=%s | atr5=%.3f | call=%.2f put=%.2f | pos=%s | pnl=$%.2f",
+        "consec=%s | atr5=%.3f | call=%.2f put=%.2f | orb=%s | pos=%s | pnl=$%.2f",
         b.close,
         m_state.direction.upper(),
         m_state.ema5, m_state.ema20,
@@ -175,6 +181,7 @@ async def on_spy_bar(bar):
         m_state.atr5,
         new_strikes["call_strike"],
         new_strikes["put_strike"],
+        orb_filter.bias or "NONE",
         f"{pos.symbol} @{pos.entry_price:.2f}" if pos else "NONE",
         risk_manager.daily_pnl,
     )
@@ -264,6 +271,9 @@ async def _evaluate_entry(symbol: str):
         )
         if not should_enter:
             return
+
+        # ORB shadow filter — logs BLOCK/ALLOW without preventing the trade
+        orb_filter.check_shadow(side, symbol)
 
         entry_mid   = quote.mid
         qty         = risk_manager.size_trade(entry_mid)
@@ -843,7 +853,7 @@ def _print_status():
         min_sign = "+" if pos.min_unreal_pnl >= 0 else ""
         max_sign = "+" if pos.max_unreal_pnl >= 0 else ""
 
-        # SPY stop level (adaptive: SPY_STOP_ATR_MULT × atr5_at_entry, floored at SPY_STOP_FLOOR)
+        # SPY stop level (adaptive: 0.75 × atr5_at_entry, floored at SPY_STOP_FLOOR)
         spy_buf = max(config.SPY_STOP_FLOOR, config.SPY_STOP_ATR_MULT * pos.entry_atr5)
         spy_stop_level = (
             round(pos.entry_spy_price - spy_buf, 2)
@@ -887,8 +897,62 @@ async def _time_stop_watcher(feed: FeedManager):
         if now_et >= config.TIME_STOP:
             logger.info("TIME STOP reached (%s). Closing all positions.", config.TIME_STOP)
             await _force_close_all()
-            await feed.stop()
-            return
+            await _confirm_flat_and_exit()
+            return   # unreachable — _confirm_flat_and_exit calls os._exit
+
+
+async def _confirm_flat_and_exit():
+    """
+    Called once TIME STOP has force-closed the tracked position. Confirms via
+    Alpaca REST that no option position remains, then hard-exits the process.
+
+    Why hard-exit instead of feed.stop():
+      The normal feed teardown can hang the event loop for >20s, which trips
+      the watchdog into a restart loop. Each restart boots past TIME_STOP and
+      immediately re-fires the time stop, hanging again — observed looping 15×
+      on Jun 30. os._exit(0) sidesteps the teardown entirely: the daemon
+      watchdog thread dies with the process, so there is no restart loop.
+
+    Safety: we only exit after Alpaca confirms flat. If a position somehow
+    survived the force-close, we retry the close a few times and log loudly.
+    We still exit afterwards (a process past TIME STOP can do nothing useful),
+    but the WARNING makes any residual position visible for manual handling.
+    """
+    MAX_CLOSE_ATTEMPTS = 8
+    for attempt in range(1, MAX_CLOSE_ATTEMPTS + 1):
+        try:
+            open_opts = [
+                p for p in order_manager.get_open_positions()
+                if p.asset_class == AssetClass.US_OPTION
+            ]
+        except Exception as e:
+            logger.error("TIME STOP flat-check REST call failed: %s", e)
+            await asyncio.sleep(2)
+            continue
+
+        if not open_opts:
+            logger.info("TIME STOP: confirmed flat on Alpaca — exiting cleanly.")
+            order_manager.cancel_all_options()   # clear any dangling limit orders
+            os._exit(0)
+
+        for p in open_opts:
+            logger.warning(
+                "TIME STOP: position still open after force-close: %s qty=%s — "
+                "retrying close (attempt %d/%d)",
+                p.symbol, p.qty, attempt, MAX_CLOSE_ATTEMPTS,
+            )
+            try:
+                await order_manager.close_position(p.symbol, int(float(p.qty)))
+            except Exception as e:
+                logger.error("TIME STOP retry close failed for %s: %s", p.symbol, e)
+        await asyncio.sleep(2)
+
+    logger.warning(
+        "TIME STOP: could NOT confirm flat after %d retries — exiting anyway. "
+        "*** CHECK ALPACA for a residual open option position. ***",
+        MAX_CLOSE_ATTEMPTS,
+    )
+    os._exit(0)
 
 
 async def _force_close_all():

@@ -16,3 +16,4 @@ venv/
 
 # macOS
 .DS_Store
+gh_dashboard/

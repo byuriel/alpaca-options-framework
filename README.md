@@ -39,6 +39,12 @@ Subscribing options before 9:30 ET uses the premarket SPY price. SPY can gap sig
 **7. Restart abandons open positions**
 If your process crashes with an open position, that position still exists on Alpaca. On startup the framework polls REST, finds any existing option positions, and reconstructs local state automatically.
 
+**8. A cancelled buy can still fill**
+If an `asyncio.CancelledError` tears through your buy task mid-fill-wait (WebSocket teardown, task cancellation), cancelling the order on Alpaca is not guaranteed to win the race — the order can fill anyway, leaving a position your bot doesn't know it owns. The framework defends in depth: `buy_limit()` re-checks the order status after a cancelled wait and returns the fill if it landed (so the position is tracked normally), and a bar-driven **ghost sweeper** polls REST every minute and force-closes any option position that isn't tracked locally — worst-case exposure is ~60 seconds.
+
+**9. Feed teardown can hang the event loop at end-of-day**
+Stopping the WebSocket streams (`feed.stop()`) can block the event loop for 20+ seconds. If you run a watchdog that restarts on a silent loop, this creates a restart cascade: each fresh boot is already past the time stop, immediately re-fires it, hangs again, restarts again. The framework sidesteps the teardown entirely — after the time stop closes all positions, it **verifies the account is flat via REST (with retries), then hard-exits with `os._exit(0)`**. Observed live: flat-check plus exit completes in under 100ms.
+
 ---
 
 ## Architecture
@@ -49,7 +55,7 @@ asyncio.gather(
     _option_subscriber(),       # waits for 9:30 ET bar → subscribes strikes
     _resubscribe_watcher(),     # re-subscribes if SPY moves ±$3
     _exit_monitor(),            # 30-second safety net (WebSocket reconnect gaps)
-    _time_stop_watcher(),       # force-close everything at 3:25 PM ET
+    _time_stop_watcher(),       # 3:25 PM ET: close all → verify flat → clean exit
     _status_loop(),             # live terminal display
 )
 
@@ -76,6 +82,9 @@ alpaca-options-framework/
 ├── risk.py         Position sizing, daily loss gate, cooldown, P&L restore
 ├── strikes.py      ATR calculation, dynamic strike selection, OCC symbol builder
 ├── momentum.py     EMA5/EMA20, VWAP, ROC5, atr5, consecutive bar engine
+│
+├── orb_filter.py   Clock-hour ORB directional regime filter (shadow mode)
+├── kpi_dashboard.py  Self-contained HTML KPI report generator (see below)
 │
 └── signals.py      ← YOUR STRATEGY GOES HERE
                       Entry and exit signal logic — placeholder implementation
@@ -158,6 +167,38 @@ At 3:25 PM ET (time stop watcher):
 **Race-condition safety:** `exit_pending` is set to `True` before the first `await` in `_evaluate_exit()`. Because asyncio is cooperative (no preemption between synchronous lines), no duplicate exit orders can be submitted even when multiple quote ticks arrive simultaneously.
 
 All exits are logged to `logs/trades_YYYY-MM-DD.csv` with entry price, exit price, quantity, reason, P&L, and timestamps.
+
+---
+
+## Shadow Filters — Validate Before You Gate
+
+`orb_filter.py` demonstrates a pattern worth stealing even if you don't use the filter itself: **run a new filter in observe-only mode before letting it block live trades.**
+
+The filter tracks each clock hour's opening-range high/low (first 1-min bar of the hour) and compares it to the prior hour's: both higher → call-only bias, both lower → put-only bias, mixed → no restriction. Wired into the entry path, `check_shadow()` logs what it *would* have done on every real entry signal:
+
+```
+ORB_SHADOW | BLOCK: SPY260702C00753000 side=call bias=put — trade allowed (shadow mode)
+ORB_SHADOW | ALLOW: SPY260702P00746000 side=put bias=put
+```
+
+It always returns `True` — zero effect on trading. After enough sessions you can score every BLOCK against the trade's actual P&L and decide with data, not backtest hope, whether to flip it live (a two-line change). Backtests lie in subtle ways — pre-market data availability, restart behavior, bar timing. Shadow mode tests the filter in the exact code path that would run it.
+
+---
+
+## KPI Dashboard
+
+`kpi_dashboard.py` generates a self-contained dark-theme HTML report (Chart.js via CDN, no build step) from the framework's own logs:
+
+- Equity curve and daily P&L over a rolling calendar window (`--days 30`)
+- Win rate, profit factor, EV/trade, breakdowns by exit reason / side / entry hour
+- **True account P&L**: parses ghost-sweeper closes out of the bot logs and adds them to the booked CSV totals — duplicate fills don't silently vanish from your stats
+- Shadow-filter scoreboard: actual vs. would-have-been-filtered P&L, every block listed
+
+```bash
+python kpi_dashboard.py --days 30 --out dashboard/index.html
+```
+
+Push the output to any static host (GitHub Pages works fine) for a public, auto-updating track record.
 
 ---
 

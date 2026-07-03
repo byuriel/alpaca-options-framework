@@ -75,22 +75,23 @@ class OrderManager:
             filled = await self._wait_for_fill(order.id)
         except asyncio.CancelledError:
             # Task cancelled while waiting for fill — attempt cancel on Alpaca.
-            # If the order already filled, cancel fails silently and creates a
-            # ghost position. We check status synchronously and log clearly so
-            # the bar-level ghost sweeper (_check_ghost_positions) can close it
-            # within the next 60 seconds.
+            # If the order already filled, cancel fails silently. Recover that
+            # fill here instead of re-raising, so the caller tracks the real
+            # position rather than seeing "no order in flight" and submitting
+            # a duplicate entry on the next quote tick.
             logger.warning("BUY fill-wait cancelled — attempting cancel of %s", order.id)
             self._cancel(order.id)
             try:
                 status = self._client.get_order_by_id(str(order.id))
                 if status.status == OrderStatus.FILLED:
                     logger.warning(
-                        "GHOST: order %s filled (%.2f × %d) despite cancel — "
-                        "ghost sweeper will close it within 60s",
+                        "RECOVERED: order %s filled (%.2f × %d) despite cancel — "
+                        "returning as a normal fill",
                         order.id,
                         float(status.filled_avg_price or 0),
                         int(float(status.filled_qty or qty)),
                     )
+                    return status
             except Exception as e:
                 logger.error("Post-cancel status check failed: %s", e)
             raise
