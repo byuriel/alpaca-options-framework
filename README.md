@@ -4,7 +4,7 @@ A production-ready Python framework for building **live options trading bots on 
 
 This repo solves the hard infrastructure problems — real-time streaming, position management, order execution, and all the Alpaca API quirks — so you can focus on your strategy.
 
-> **Note:** This repo includes a full working 0DTE SPY gamma explosion strategy — all parameters, entry/exit logic, and live session write-ups. See the r/alpacamarkets post series for the full breakdown of what works, what breaks, and why.
+> **Note:** This repo includes the full working 0DTE SPY gamma explosion strategy — all parameters, the live entry/exit logic in `signals.py`, and the complete 22-page strategy manual ([`SPY_0DTE_Strategy.pdf`](./SPY_0DTE_Strategy.pdf)) covering the options physics, every design decision, live session post-mortems (including the losing days), and the bug write-ups. Live results: [milgar7969.github.io/spy-0dte-dashboard](https://milgar7969.github.io/spy-0dte-dashboard/)
 
 ---
 
