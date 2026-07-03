@@ -86,12 +86,12 @@ alpaca-options-framework/
 ├── orb_filter.py   Clock-hour ORB directional regime filter (shadow mode)
 ├── kpi_dashboard.py  Self-contained HTML KPI report generator (see below)
 │
-└── signals.py      ← YOUR STRATEGY GOES HERE
-                      Entry and exit signal logic — placeholder implementation
-                      with full documentation of the interface.
+└── signals.py      Entry and exit signal logic — the LIVE strategy, as traded
+                      daily on paper: momentum match, ATR velocity gate, strike
+                      proximity zones, ITM guard, proxy delta.
 ```
 
-**`signals.py` is the only file you need to implement.** Everything else is working infrastructure.
+**The full strategy ships in `signals.py`** — this is the exact entry logic the public dashboard results come from, not a demo. Run it as-is, or swap in your own logic behind the same interface.
 
 ---
 
@@ -117,9 +117,9 @@ PAPER             = True   # always start on paper trading
 
 Get your keys: [alpaca.markets](https://alpaca.markets) → Paper Trading → API Keys → Generate
 
-### 3. Implement your strategy in `signals.py`
+### 3. (Optional) Adjust the strategy in `signals.py`
 
-Open `signals.py` and implement `check_entry()`. The function receives:
+The live entry logic ships ready to run — no implementation required. `check_entry()` receives:
 - `side` — "call" or "put"
 - `strike` — the option's strike price
 - `option_quote` — current bid/ask/mid
@@ -127,7 +127,7 @@ Open `signals.py` and implement `check_entry()`. The function receives:
 - `spy_price` — latest SPY price
 - `atr5` — 5-bar rolling ATR (intrabar velocity)
 
-Return `True` to trigger a limit buy. The framework handles sizing, order submission, fill confirmation, and position tracking automatically.
+Return `True` to trigger a limit buy. The framework handles sizing, order submission, fill confirmation, and position tracking automatically — so replacing the shipped strategy with your own is a single-function change.
 
 ### 4. Run
 
@@ -144,9 +144,9 @@ The bot waits for 9:30 ET, subscribes options at the actual open price, and beco
 
 ---
 
-## How Exits Work (No Strategy Required)
+## How Exits Work
 
-Even with a placeholder `check_entry()`, the exit infrastructure is fully functional. Once a position is open, exits are **quote-driven** — `_evaluate_exit()` fires on every option quote tick for the held symbol via `asyncio.create_task()`. Sub-50ms from quote arrival to order submission.
+The exit infrastructure is independent of the entry strategy. Once a position is open, exits are **quote-driven** — `_evaluate_exit()` fires on every option quote tick for the held symbol via `asyncio.create_task()`. Sub-50ms from quote arrival to order submission.
 
 ```
 On every option quote tick for the held symbol:

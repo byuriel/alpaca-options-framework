@@ -1,20 +1,13 @@
 """
-Signal engine — entry and exit logic.
+Signal engine — combines momentum state + option quote data to decide
+entry / exit actions.
 
-This file is the strategy layer. The framework ships with a placeholder
-check_entry() so you can see the interface and plug in your own logic.
-
-For a full working implementation (entry filters, ATR gate, zone checks,
-proxy delta, exit rules) see the 0DTE SPY gamma bot write-up on r/alpacamarkets.
-
-Key concepts
-------------
-- check_entry()  : called on every option quote tick when no position is open.
-                   Return True to trigger a limit buy order.
-- check_exit()   : evaluated every 5 seconds by the exit monitor.
-                   Returns an ExitSignal describing what action to take.
-- ProxyDeltaTracker : estimates option delta from price-change ratio.
-                      Disabled in Phase 0 (SPY price only updates 1x/min).
+Key concepts:
+  - Greeks from Alpaca are null for 0DTE, so we compute proxy delta from
+    the rolling ratio of option price change to SPY price change.
+  - Zone is determined by how close SPY is to the strike.
+  - Entry fires only when: valid time window, correct momentum direction,
+    option in approach/activation zone, proxy delta trending up, affordable price.
 """
 
 import datetime
@@ -45,20 +38,15 @@ class Quote:
 @dataclass
 class ProxyDeltaTracker:
     """
-    Estimates delta = Δoption_price / ΔSPY_price.
-    Updated on each option quote tick paired with the latest SPY price.
-
-    Note: disabled in Phase 0 because SPY price only updates once per
-    1-min bar. Between bars the denominator is 0 and delta stays flat.
-    Re-enable when tick-level SPY price is available (e.g. from the
-    underlying_price field in OptionDataStream snapshots).
+    Estimates delta = Δoption_price / ΔSPY_price over the last N seconds.
+    Updated each time a new option quote arrives paired with the latest SPY price.
     """
     _prev_option_mid: Optional[float] = field(default=None, repr=False)
     _prev_spy_price:  Optional[float] = field(default=None, repr=False)
     _prev_ts:         Optional[datetime.datetime] = field(default=None, repr=False)
 
     proxy_delta:  float = 0.0
-    delta_rising: bool  = False
+    delta_rising: bool  = False   # True if proxy_delta increased vs last reading
 
     def update(self, option_mid: float, spy_price: float, ts: datetime.datetime) -> float:
         if (
@@ -69,7 +57,10 @@ class ProxyDeltaTracker:
             d_opt = option_mid - self._prev_option_mid
             d_spy = spy_price  - self._prev_spy_price
             new_delta = d_opt / d_spy if d_spy != 0 else self.proxy_delta
+
+            # Clamp to plausible range [0, 1] for calls, [-1, 0] for puts
             new_delta = max(-1.0, min(1.0, new_delta))
+
             self.delta_rising = new_delta > self.proxy_delta
             self.proxy_delta  = new_delta
 
@@ -77,6 +68,16 @@ class ProxyDeltaTracker:
         self._prev_spy_price  = spy_price
         self._prev_ts         = ts
         return self.proxy_delta
+
+
+def _zone(spy_price: float, strike: float) -> str:
+    """Return proximity zone of SPY price relative to the strike."""
+    dist_pct = abs(strike - spy_price) / spy_price
+    if dist_pct <= config.ACTIVATION_PCT:
+        return "activation"
+    if dist_pct <= config.APPROACH_PCT:
+        return "approach"
+    return "dead"
 
 
 def _in_entry_window() -> bool:
@@ -89,21 +90,11 @@ def _past_time_stop() -> bool:
     return now_et >= config.TIME_STOP
 
 
-def _zone(spy_price: float, strike: float) -> str:
-    """Return proximity zone of SPY relative to the strike."""
-    dist_pct = abs(strike - spy_price) / spy_price
-    if dist_pct <= config.ACTIVATION_PCT:
-        return "activation"
-    if dist_pct <= config.APPROACH_PCT:
-        return "approach"
-    return "dead"
-
-
 # ── Entry signal ──────────────────────────────────────────────────────────────
 
 def check_entry(
     *,
-    side:          str,               # "call" or "put"
+    side:          str,             # "call" or "put"
     strike:        float,
     option_quote:  Quote,
     momentum:      MomentumState,
@@ -111,26 +102,13 @@ def check_entry(
     spy_price:     float,
     trades_today:  int,
     has_open_pos:  bool,
-    atr5:          float = 0.0,
+    atr5:          float = 0.0,     # 5-bar ATR at entry bar — used for ATR gate
 ) -> bool:
     """
-    Return True when all entry conditions are satisfied.
-
-    This is a placeholder implementation — it checks the structural
-    guards (time window, position limit, daily trade cap) but does
-    NOT implement any directional or signal logic.
-
-    Replace this function with your own strategy.
-
-    Suggested filters to implement:
-        - Momentum direction match (BULL for calls, BEAR for puts)
-        - ATR5 velocity gate (atr5 >= config.ATR5_MIN_ENTRY)
-        - Strike proximity zone check (activation only)
-        - Option price range (OPTION_MIN_PRICE / OPTION_MAX_PRICE)
-        - ITM guard (call: spy < strike, put: spy > strike)
-        - Proxy delta minimum (if tick-level SPY price available)
+    Returns True when all entry conditions are satisfied.
     """
-    # ── Structural guards (always required) ───────────────────────────────────
+    sym = option_quote.symbol
+
     if has_open_pos:
         return False
     if trades_today >= config.MAX_TRADES_PER_DAY:
@@ -138,67 +116,108 @@ def check_entry(
     if not _in_entry_window():
         return False
 
-    # ── Add your signal logic below ───────────────────────────────────────────
-    # Example structure:
-    #
-    # required_direction = "bull" if side == "call" else "bear"
-    # if momentum.direction != required_direction:
-    #     return False
-    #
-    # if atr5 < config.ATR5_MIN_ENTRY:
-    #     return False
-    #
-    # price = option_quote.mid
-    # if price < config.OPTION_MIN_PRICE or price > config.OPTION_MAX_PRICE:
-    #     return False
-    #
-    # if side == "call" and spy_price >= strike:
-    #     return False
-    # if side == "put"  and spy_price <= strike:
-    #     return False
-    #
-    # zone = _zone(spy_price, strike)
-    # if zone != "activation":
-    #     return False
-    #
-    # return True
+    # ATR gate — requires minimum intrabar velocity to support a gamma move
+    if atr5 < config.ATR5_MIN_ENTRY:
+        logger.debug("SKIP %s | atr5=%.3f below min=%.3f", sym, atr5, config.ATR5_MIN_ENTRY)
+        return False
 
-    return False   # default: no entries until you implement your logic
+    # Momentum must match the direction of the trade
+    required_direction = "bull" if side == "call" else "bear"
+    if momentum.direction != required_direction:
+        logger.debug("SKIP %s | momentum=%s need=%s", sym, momentum.direction, required_direction)
+        return False
+
+    # Option price within affordable range
+    price = option_quote.mid
+    if price < config.OPTION_MIN_PRICE or price > config.OPTION_MAX_PRICE:
+        logger.debug("SKIP %s | price=%.2f outside [%.2f, %.2f]",
+                     sym, price, config.OPTION_MIN_PRICE, config.OPTION_MAX_PRICE)
+        return False
+
+    # Directionality: option must be OTM and SPY approaching from the correct side.
+    # A call entered when SPY >= strike is already ITM — the gamma explosion has passed.
+    # A put entered when SPY <= strike is already ITM — same problem.
+    if side == "call" and spy_price >= strike:
+        logger.debug("SKIP %s | call ITM: spy=%.2f >= strike=%.2f", sym, spy_price, strike)
+        return False
+    if side == "put" and spy_price <= strike:
+        logger.debug("SKIP %s | put ITM: spy=%.2f <= strike=%.2f", sym, spy_price, strike)
+        return False
+
+    # Must be in activation zone only — approach zone entries reverse too often
+    zone = _zone(spy_price, strike)
+    if zone != "activation":
+        logger.debug("SKIP %s | zone=%s spy=%.2f strike=%.2f", sym, zone, spy_price, strike)
+        return False
+
+    # Proxy delta must be above minimum
+    if proxy_tracker.proxy_delta < config.PROXY_DELTA_MIN:
+        logger.debug("SKIP %s | proxy_delta=%.3f < min=%.3f",
+                     sym, proxy_tracker.proxy_delta, config.PROXY_DELTA_MIN)
+        return False
+
+    # Optionally require delta is rising (relaxed in data-collection mode)
+    if config.REQUIRE_DELTA_RISING and not proxy_tracker.delta_rising:
+        logger.debug("SKIP %s | delta not rising (%.3f)", sym, proxy_tracker.proxy_delta)
+        return False
+
+    logger.info(
+        "ENTRY signal: side=%s strike=%.2f spy=%.2f zone=%s "
+        "proxy_delta=%.3f option_mid=%.2f momentum=%s",
+        side, strike, spy_price, zone,
+        proxy_tracker.proxy_delta, price, momentum.direction,
+    )
+    return True
 
 
-# ── Exit signal ───────────────────────────────────────────────────────────────
+# ── Exit signals ──────────────────────────────────────────────────────────────
 
 @dataclass
 class ExitSignal:
-    should_exit:  bool = False
-    reason:       str  = ""
-    partial_exit: bool = False
-    qty_to_close: int  = 0
+    should_exit:   bool   = False
+    reason:        str    = ""
+    partial_exit:  bool   = False   # True = close half, False = close all
+    qty_to_close:  int    = 0
 
 
 def check_exit(
     *,
-    entry_price:  float,
-    current_mid:  float,
-    qty_held:     int,
-    target1_hit:  bool,
-    momentum:     MomentumState,
-    side:         str,
+    entry_price:   float,
+    current_mid:   float,
+    qty_held:      int,
+    target1_hit:   bool,
+    momentum:      MomentumState,
+    side:          str,
 ) -> ExitSignal:
     """
-    Evaluate exit conditions and return an ExitSignal.
-
-    Note: in this framework the primary exit logic runs inline in
-    main._exit_monitor() (TP, stop, peak trail). This function is
-    provided as an extension point for additional exit rules such as:
-        - Momentum flip (BEAR regime while holding a call)
-        - Time-based theta exit (held > N min and mid < entry × 0.90)
-        - Partial profit taking at an intermediate target
-
-    Return ExitSignal(False) to take no action.
+    Evaluates all exit conditions and returns an ExitSignal.
+    Caller is responsible for tracking whether target1 has already been taken.
     """
     if _past_time_stop():
         return ExitSignal(True, "time_stop", partial_exit=False, qty_to_close=qty_held)
 
-    # Add your exit rules here
+    # Hard stop
+    stop_price = entry_price * config.STOP_MULT
+    if current_mid <= stop_price:
+        return ExitSignal(True, "hard_stop", partial_exit=False, qty_to_close=qty_held)
+
+    # Momentum flip — exit all immediately
+    required_direction = "bull" if side == "call" else "bear"
+    if momentum.direction not in (required_direction, "neutral"):
+        return ExitSignal(True, "momentum_flip", partial_exit=False, qty_to_close=qty_held)
+
+    # Target 1 — take 50% off
+    if not target1_hit and current_mid >= entry_price * config.TARGET_1_MULT:
+        half = max(1, qty_held // 2)
+        return ExitSignal(True, "target_1", partial_exit=True, qty_to_close=half)
+
+    # Target 2 — exit remainder
+    if current_mid >= entry_price * config.TARGET_2_MULT:
+        return ExitSignal(True, "target_2", partial_exit=False, qty_to_close=qty_held)
+
+    # Breakeven trailing stop — if price has risen past 1.5× but then fallen back to entry
+    if current_mid >= entry_price * config.BREAKEVEN_MULT:
+        if current_mid <= entry_price:
+            return ExitSignal(True, "breakeven_trail", partial_exit=False, qty_to_close=qty_held)
+
     return ExitSignal(False)
