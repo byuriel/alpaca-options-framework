@@ -99,6 +99,12 @@ alpaca-options-framework/
 │
 ├── trade_stats.py  Statistics layer — cluster bootstrap CIs, exact t/Wilson
 │                     inference, verdict tiers, paired sweep comparison
+├── reconcile.py    Nightly broker reconciliation — order-ID matching, gate
+│                     lock on unexplained discrepancies
+├── feed_monitor.py Feed coverage & quality — dark symbols, quote gaps,
+│                     spread stats, held-symbol staleness analysis
+├── alerts.py       Critical-event alerting — webhook/email on kill switches,
+│                     exit failures, reconciliation mismatches
 ├── orb_filter.py   Clock-hour ORB directional regime filter (shadow mode)
 ├── kpi_dashboard.py  Self-contained HTML KPI report generator (see below)
 ├── tests/          Unit + async integration + replay-determinism tests
@@ -267,6 +273,54 @@ Scope, stated plainly: the simulated broker always resolves, so
 broker-failure paths (close retries, reconciliation, ghost sweeps) are
 covered by unit tests, not replay; live-only watchers (watchdog, staleness
 flatten) don't run. Replay measures the *strategy*, not the plumbing.
+
+---
+
+## Operational Trust — Reconcile, Monitor, Alert
+
+Three tools turn "a bot that trades" into "a system whose numbers you can
+defend":
+
+**Nightly reconciliation** (`reconcile.py`) — run from cron after each close:
+
+```bash
+python reconcile.py            # exit 0 = clean, 1 = discrepancies
+```
+
+Every local CSV row is matched against the broker's closed orders **by order
+ID**: existence, quantity (partial exit legs aggregated per entry order),
+average fill price, side. Broker option activity the CSV doesn't know about
+(ghost sweeps, manual trades) is surfaced item by item. On failure it writes
+a flag file and the bot **locks its entry gate at the next startup** until
+you investigate and run `python reconcile.py --clear` — trading does not
+resume on top of unexplained numbers. An unreconciled track record is a
+self-published claim; a reconciled one is evidence.
+
+**Feed coverage & quality** (`feed_monitor.py`) — run on any session
+recording:
+
+```bash
+python feed_monitor.py recordings/session_2026-07-06.jsonl.gz --json
+```
+
+Measures what the feed actually delivered: subscribed-vs-delivering symbols
+(a **dark** symbol — subscribed, zero quotes — is a feed symbol cap or dead
+contract, and it silently biases which strikes can ever fire; relevant on
+the free plan's documented 30-symbol WebSocket limit vs this bot's 43+
+subscriptions), quote-gap distribution, spread stats, and the maximum quote
+gap on each held position (the number the staleness kill switch lives on).
+Exits non-zero below 90% coverage so cron can alert. Run it on indicative
+sessions now and OPRA sessions later — the diff is the measured cost of the
+free feed.
+
+**Critical-event alerting** (`alerts.py`) — configure `ALERT_WEBHOOK_URL`
+(Slack-compatible; Discord via `/slack` suffix) and/or SMTP email in `.env`.
+Every CRITICAL log line — staleness flatten, exit failure + gate lock,
+broker desync, reconciliation failure, watchdog restart — reaches your
+phone. Rate-limited (5-min per-message cooldown, 20/day cap with suppression
+counts), delivered off the event loop, flushed before every hard-exit path
+so the last alert escapes. A machine that flattens at 11:00 and says
+nothing until you read the terminal is not an unattended system.
 
 ---
 

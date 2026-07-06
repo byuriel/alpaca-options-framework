@@ -30,15 +30,18 @@ deliberately small and verifiable.*
 
 ## Tier 1 — Trust and safety gates before live money
 
-**1. Nightly broker reconciliation** *(the most important unbuilt item —
-promised in QUANT_REVIEW Phase 1 and still missing)*
+*Status: items 1–3 SHIPPED (reconcile.py, feed_monitor.py, alerts.py);
+items 4–5 remain.*
+
+**1. ✅ Nightly broker reconciliation** *(was the most important unbuilt
+item — promised in QUANT_REVIEW Phase 1)*
 Compare the local trades CSV against Alpaca's account activities API after
 each session: every fill matched by order ID, quantities and prices equal,
 fees accounted. Any mismatch → CRITICAL alert + risk gate locked at next
 start. An unreconciled track record is a self-published claim; a reconciled
 one is evidence. ~150 lines + tests.
 
-**2. Feed coverage & quality monitor**
+**2. ✅ Feed coverage & quality monitor**
 At EOD (and stamped into recording metadata): subscribed symbols vs symbols
 that actually delivered ≥1 quote; per-symbol quote inter-arrival
 distribution; session spread statistics. Resolves the 30-symbol question
@@ -46,7 +49,7 @@ empirically, detects dead subscriptions and nonexistent strikes, and — once
 OPRA is enabled — quantifies exactly what the indicative feed was hiding by
 before/after comparison. ~100 lines, pure post-processing of existing data.
 
-**3. Critical-event alerting**
+**3. ✅ Critical-event alerting**
 The bot currently tells no one when it matters: staleness flatten, EXIT
 FAILED + gate lock, watchdog restart, event flatten, reconciliation
 mismatch. Add a webhook/SMTP hook (env-configured, stdlib) fired on CRITICAL

@@ -201,6 +201,9 @@ async def _run(rec_path: str, out_dir: str) -> dict:
                 stop_reason = "time_stop"
                 break
 
+            if ev[0] == "s":
+                continue   # subscription bookkeeping — feed_monitor's input,
+                           # not a market event; replay derives routing itself
             if ev[0] == "b":
                 _, _, ts_iso, o, h, l, c, v = ev
                 bar = _SimBar(datetime.datetime.fromisoformat(ts_iso), o, h, l, c, v)

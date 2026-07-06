@@ -22,6 +22,7 @@ Line formats (JSONL, compact arrays — ~40% smaller than dicts at this volume):
   ["m", recv_wall, {metadata...}]
   ["b", recv_wall, bar_ts_iso, open, high, low, close, volume]
   ["q", recv_wall, symbol, bid, ask, exch_ts_iso, bid_size, ask_size]
+  ["s", recv_wall, [symbols...]]        # subscription event (open + expansions)
 
 recv_wall is the local receive time (epoch seconds) — the axis replay's
 simulated clock runs on. Exchange timestamps are preserved for analysis but
@@ -77,6 +78,12 @@ class MarketDataRecorder:
                      bid_size: int = 0, ask_size: int = 0):
         self._put(["q", time.time(), symbol, bid, ask, exch_ts_iso,
                    bid_size, ask_size])
+
+    def record_subscription(self, symbols):
+        """Subscription events make coverage measurable: subscribed-but-
+        never-delivering symbols are how a feed's symbol cap or a dead
+        contract shows up (feed_monitor.py)."""
+        self._put(["s", time.time(), sorted(symbols)])
 
     def _put(self, item):
         try:
@@ -178,7 +185,7 @@ def load_session(path: str):
             else:
                 for k, v in ev[2].items():
                     meta.setdefault(k, v)
-        elif ev[0] in ("b", "q"):
+        elif ev[0] in ("b", "q", "s"):
             events.append(ev)
     return meta or {}, events
 

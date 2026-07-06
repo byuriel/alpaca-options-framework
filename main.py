@@ -59,11 +59,13 @@ from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import Adjustment
 from alpaca.trading.enums import AssetClass
 
+import alerts
 import clock
 import config
 import event_calendar
 import market_calendar
 import recorder as recorder_mod
+import reconcile as reconcile_mod
 import strikes
 from feeds import FeedManager, option_feed, stock_feed
 from momentum import MomentumEngine, Bar
@@ -653,6 +655,8 @@ async def _resubscribe_watcher():
                 asyncio.to_thread(_feed.add_option_symbols, new_symbols),
                 timeout=5.0,
             )
+            if _recorder is not None:
+                _recorder.record_subscription(new_symbols)
             logger.info(
                 "Re-subscribed: call=%.2f put=%.2f | %d symbols total",
                 new_strikes["call_strike"], new_strikes["put_strike"], len(new_symbols),
@@ -690,6 +694,8 @@ async def _option_subscriber():
     _current_subscriptions.update(_build_routing_table(strikes_dict))
 
     _feed.subscribe_options(all_syms)
+    if _recorder is not None:
+        _recorder.record_subscription(all_syms)   # feed_monitor's coverage input
     logger.info(
         "Subscribed at open: call=%.2f put=%.2f | %d symbols",
         strikes_dict["call_strike"], strikes_dict["put_strike"], len(all_syms),
@@ -1312,6 +1318,7 @@ async def _confirm_flat_and_exit():
         if not open_opts:
             logger.info("TIME STOP: confirmed flat on Alpaca — exiting cleanly.")
             order_manager.cancel_all_options()   # clear any dangling limit orders
+            alerts.flush()   # last chance before the hard exit
             os._exit(0)
 
         for p in open_opts:
@@ -1339,6 +1346,7 @@ async def _confirm_flat_and_exit():
         "*** CHECK ALPACA for a residual open option position. ***",
         MAX_CLOSE_ATTEMPTS,
     )
+    alerts.flush()   # the residual-position warning MUST escape
     os._exit(0)
 
 
@@ -1383,6 +1391,29 @@ async def main():
     _ghost_sweep_lock = asyncio.Lock()
 
     config.validate_credentials()
+
+    # ── Alerting ──────────────────────────────────────────────────────────────
+    # Every CRITICAL log line (staleness flatten, EXIT FAILED, desync,
+    # reconciliation failure) reaches the operator. Configure channels via
+    # ALERT_WEBHOOK_URL / ALERT_EMAIL_TO — see alerts.py.
+    if alerts.configure_from_env():
+        alerts.attach_to_root_logger()
+        logger.info("Alerting active — CRITICAL events will be delivered.")
+    else:
+        logger.warning(
+            "Alerting NOT configured (no ALERT_WEBHOOK_URL / ALERT_EMAIL_TO) — "
+            "kill-switch events will only appear in this log.")
+
+    # ── Reconciliation gate ───────────────────────────────────────────────────
+    # A failed nightly reconciliation means the local record and the broker
+    # disagree. Trading does not resume on top of unexplained numbers.
+    flag = reconcile_mod.pending_failure_flag()
+    if flag:
+        risk_manager.lock(f"unresolved reconciliation failure ({os.path.basename(flag)})")
+        logger.critical(
+            "RECONCILIATION FLAG present: %s — entry gate LOCKED. Investigate, "
+            "then clear with: python reconcile.py --clear", flag,
+        )
 
     # ── Trading calendar gate ─────────────────────────────────────────────────
     # A 0DTE bot must not run on a non-session day (its symbols won't exist),
@@ -1583,6 +1614,7 @@ async def main():
     def _signal_shutdown():
         async def _do():
             await _shutdown("Ctrl+C / SIGTERM")
+            alerts.flush(1.0)
             os._exit(0)
         asyncio.create_task(_do())
 
@@ -1607,6 +1639,7 @@ async def main():
                         except Exception:
                             # Event loop may be frozen — force exit regardless
                             logger.warning("Event loop unresponsive — forcing exit.")
+                        alerts.flush(1.0)
                         os._exit(0)
                     elif line == "r":
                         logger.info("Keyboard restart requested — positions left open for recovery.")
@@ -1617,6 +1650,7 @@ async def main():
                             # Event loop may be frozen — restart anyway, position
                             # stays on Alpaca and will be recovered on next startup.
                             logger.warning("Event loop unresponsive — forcing restart.")
+                        alerts.flush(1.0)
                         os.execl(sys.executable, sys.executable, *sys.argv)
                     elif line == "t":
                         _print_trades()
@@ -1649,6 +1683,9 @@ async def main():
                     "Open positions will be recovered on startup.",
                     stale,
                 )
+                alerts.alert(f"WATCHDOG restart: event loop silent {stale:.0f}s — "
+                             "restarting; position (if any) recovers on startup")
+                alerts.flush(2.0)
                 _time.sleep(1)   # let the log flush
                 os.execl(sys.executable, sys.executable, *sys.argv)
 
