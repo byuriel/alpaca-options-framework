@@ -91,9 +91,14 @@ alpaca-options-framework/
 ├── momentum.py     EMA5/EMA20, VWAP, ROC5, atr5, consecutive bar engine
 │                     (session stats strictly RTH — premarket feeds EMAs only)
 │
+├── clock.py        Single time source — live wall clock or replay's SimClock
+├── recorder.py     Off-loop market-data capture → recordings/*.jsonl.gz
+├── sim_broker.py   Deterministic conservative execution model for replay
+├── replay.py       Replay CLI — recorded sessions through the live handlers
+│
 ├── orb_filter.py   Clock-hour ORB directional regime filter (shadow mode)
 ├── kpi_dashboard.py  Self-contained HTML KPI report generator (see below)
-├── tests/          Unit + async integration tests (pytest)
+├── tests/          Unit + async integration + replay-determinism tests
 │
 └── signals.py      Entry signal logic — the LIVE strategy, as traded
                       daily on paper: momentum match, ATR velocity gate, strike
@@ -214,6 +219,43 @@ quantity, reason, **P&L net of regulatory fees**, order IDs (reconcilable
 against broker statements), decision-time bid/ask, and per-side slippage.
 Position metadata is persisted to `logs/position_state.json`, so a restart
 recovers the real entry time/price/SPY level — not an approximation.
+
+---
+
+## Record & Replay — Same Code, Recorded Markets
+
+Backtests lie in the seams — bar timing, data availability, fill assumptions.
+This framework takes a different route: the live bot **records every bar and
+option quote its decision code receives** (`recordings/session_YYYY-MM-DD.jsonl.gz`,
+written off the event loop, a few tens of MB per session, on by default via
+`RECORD_MARKET_DATA`), and `replay.py` feeds those events back through the
+**identical live handlers** — `on_spy_bar` / `on_option_quote`, the same
+entry gates, the same exit executor — under a simulated clock and a
+simulated broker:
+
+```bash
+python replay.py recordings/session_2026-07-06.jsonl.gz
+python replay.py recordings/session_*.jsonl.gz --set TP_MULT=1.8 --set STOP_MULT=0.45
+```
+
+- **Deterministic**: same recording + same config → byte-identical trade CSV,
+  every run (pinned by the test suite).
+- **Conservative fills by construction**: buys cross the spread at the ask
+  (a resting limit fills only when the recorded ask actually crosses); sells
+  hit the bid. Entries whose limit never crossed are counted as
+  `unfilled entries` in the summary — missed fills are a result, not noise.
+- **Session-faithful**: the simulated clock drives the entry window, quote
+  freshness, the 30-second exit-monitor cadence, and the time stop; the
+  session's config snapshot, ATR baseline, and momentum preseed are stored
+  in the recording's metadata line.
+- **Parameter sweeps in seconds**: `--set KEY=VALUE` overrides any config
+  scalar for the run and restores it afterwards — one recorded session
+  answers "what would a wider stop have done?" without waiting a live day.
+
+Scope, stated plainly: the simulated broker always resolves, so
+broker-failure paths (close retries, reconciliation, ghost sweeps) are
+covered by unit tests, not replay; live-only watchers (watchdog, staleness
+flatten) don't run. Replay measures the *strategy*, not the plumbing.
 
 ---
 

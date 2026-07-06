@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+import clock
 import config
 from momentum import MomentumState
 
@@ -91,7 +92,9 @@ def _zone(spy_price: float, strike: float) -> str:
 
 
 def _in_entry_window() -> bool:
-    now_et = datetime.datetime.now(tz=config.ET).strftime("%H:%M")
+    # clock, not datetime.now(): the entry window must follow replay's
+    # simulated session time, not the machine running the replay
+    now_et = clock.now_et().strftime("%H:%M")
     return config.ENTRY_START <= now_et <= config.ENTRY_END
 
 

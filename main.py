@@ -59,8 +59,10 @@ from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 from alpaca.trading.enums import AssetClass
 
+import clock
 import config
 import market_calendar
+import recorder as recorder_mod
 import strikes
 from feeds import FeedManager
 from momentum import MomentumEngine, Bar
@@ -92,9 +94,14 @@ risk_manager    = RiskManager()
 order_manager   = OrderManager()
 orb_filter      = ORBFilter()
 
-_entry_lock:       asyncio.Lock = asyncio.Lock()
-_ghost_sweep_lock: asyncio.Lock = asyncio.Lock()
+# Created inside the running event loop (main() / replay setup) — a Lock
+# constructed at import time binds to the wrong loop on Python 3.9 and
+# raises "attached to a different loop" at first acquire.
+_entry_lock:       asyncio.Lock = None
+_ghost_sweep_lock: asyncio.Lock = None
 _foreign_positions_seen: set = set()   # out-of-scope positions logged once
+_recorder = None   # MarketDataRecorder — created in main() when enabled;
+                   # stays None in replay (replay reads recordings, never writes)
 
 # ── Watchdog heartbeat ────────────────────────────────────────────────────────
 # Updated by _status_loop every iteration. Watchdog thread checks every 10s;
@@ -153,8 +160,10 @@ async def on_spy_bar(bar):
         close  = float(bar.close),
         volume = float(bar.volume),
     )
+    if _recorder is not None:
+        _recorder.record_bar(b.t.isoformat(), b.open, b.high, b.low, b.close, b.volume)
     bot_state.spy_price = b.close
-    bot_state.last_bar_monotonic = _time.monotonic()   # staleness watcher input
+    bot_state.last_bar_monotonic = clock.monotonic()   # staleness watcher input
     m_state = momentum_engine.on_bar(b)
 
     # Tick cooldown counter
@@ -233,6 +242,9 @@ async def on_option_quote(quote):
     ask = float(quote.ask_price or 0)
     ts  = quote.timestamp
 
+    if _recorder is not None:
+        _recorder.record_quote(sym, bid, ask, ts.isoformat() if ts else "")
+
     # Update proxy delta tracker
     bot_state.update_option_quote(sym, bid, ask, ts)
 
@@ -254,7 +266,7 @@ async def on_option_quote(quote):
         return
     if sym not in _current_subscriptions:
         return
-    if not _entry_lock.locked():
+    if _entry_lock is not None and not _entry_lock.locked():
         asyncio.create_task(_evaluate_entry(sym))
 
 
@@ -280,9 +292,9 @@ async def _evaluate_entry(symbol: str):
         # 30s fill wait) must not size a trade off a quote from before the
         # wait — the market has moved and the signal never saw this price.
         if (quote.recv_monotonic > 0
-                and _time.monotonic() - quote.recv_monotonic > config.ENTRY_QUOTE_MAX_AGE_SEC):
+                and clock.monotonic() - quote.recv_monotonic > config.ENTRY_QUOTE_MAX_AGE_SEC):
             logger.debug("SKIP %s | quote stale (%.1fs old)", symbol,
-                         _time.monotonic() - quote.recv_monotonic)
+                         clock.monotonic() - quote.recv_monotonic)
             return
 
         # Entry-side quote quality gate: a mid computed inside a wide (or
@@ -355,7 +367,7 @@ async def _evaluate_entry(symbol: str):
                 strike           = strike,
                 qty              = filled_qty,
                 entry_price      = fill_price,
-                entry_time       = datetime.datetime.now(tz=config.ET),
+                entry_time       = clock.now_et(),
                 order_id         = str(order.id),
                 entry_spy_price  = bot_state.spy_price,
                 entry_atr5       = momentum_engine.state.atr5,
@@ -695,7 +707,7 @@ async def _check_ghost_positions():
     """
     if bot_state.exit_pending or bot_state.entry_pending:
         return
-    if _ghost_sweep_lock.locked():
+    if _ghost_sweep_lock is None or _ghost_sweep_lock.locked():
         return
     async with _ghost_sweep_lock:
         alpaca_positions = await order_manager.get_open_positions_async()
@@ -1031,7 +1043,7 @@ async def _staleness_watcher():
     no_quote_since: float = 0.0   # first time we saw a held position with NO cached quote
     while True:
         await asyncio.sleep(5)
-        now_m = _time.monotonic()
+        now_m = clock.monotonic()   # same axis as Quote.recv_monotonic
 
         now_hhmm = datetime.datetime.now(tz=config.ET).strftime("%H:%M")
         if now_hhmm >= config.TIME_STOP:
@@ -1291,6 +1303,10 @@ async def _confirm_flat_and_exit():
 
 async def main():
     global _feed, _baseline_atr, _market_open_event, _WATCHDOG_END
+    global _entry_lock, _ghost_sweep_lock
+
+    _entry_lock       = asyncio.Lock()   # created here, inside the running loop
+    _ghost_sweep_lock = asyncio.Lock()
 
     config.validate_credentials()
 
@@ -1350,6 +1366,7 @@ async def main():
 
     # Pre-seed EMAs with last 30 RTH 1-min bars
     logger.info("Pre-seeding momentum engine...")
+    seed_bars = []
     try:
         seed_end   = datetime.datetime.now(tz=config.ET)
         seed_start = seed_end - datetime.timedelta(days=5)  # 5 days covers Mon→Fri lookback
@@ -1376,6 +1393,30 @@ async def main():
             bot_state.spy_price = seed_bars[-1].close
     except Exception as e:
         logger.warning("Pre-seed failed (%s) — EMAs will warm from live bars.", e)
+
+    # ── Market data recorder ──────────────────────────────────────────────────
+    # Captures every bar/quote the decision code receives, plus the session's
+    # full provenance (config snapshot, ATR baseline, preseed bars, chain), so
+    # replay.py can reproduce this session through the same code paths.
+    global _recorder
+    if config.RECORD_MARKET_DATA:
+        try:
+            _recorder = recorder_mod.MarketDataRecorder(
+                recorder_mod.default_recording_path(config.RECORDINGS_DIR, today))
+            _recorder.record_meta({
+                "session_date":  today.isoformat(),
+                "baseline_atr":  _baseline_atr,
+                "paper":         config.PAPER,
+                "config":        {k: v for k, v in vars(config).items()
+                                  if k.isupper()
+                                  and isinstance(v, (int, float, str, bool))},
+                "preseed_bars":  [[b.t.isoformat(), b.open, b.high, b.low,
+                                   b.close, b.volume] for b in seed_bars],
+                "chain_symbols": sorted(strikes._chain_cache.get(today) or []),
+            })
+        except Exception as e:
+            logger.error("Recorder init failed (%s) — trading continues UNRECORDED.", e)
+            _recorder = None
 
     # Cancel any pending option orders left over from a previous crash.
     # This clears ghost orders that may have been submitted but not filled

@@ -8,8 +8,11 @@ LOG_DIR = "logs"
 
 def today_et() -> datetime.date:
     """Today in exchange time. Always use this — never date.today(), which is
-    the machine-local date and wrong around midnight on non-ET hosts."""
-    return datetime.datetime.now(tz=ET).date()
+    the machine-local date and wrong around midnight on non-ET hosts.
+    Delegates to the clock module so replay's simulated clock governs dates
+    too (lazy import — clock imports config, so no top-level cycle)."""
+    import clock
+    return clock.today_et()
 
 
 # ── API credentials ────────────────────────────────────────────────────────────
@@ -149,6 +152,15 @@ STALE_BAR_WARN_SEC      = 180  # no SPY bar for this long during RTH → lock ne
 # ── Order management ───────────────────────────────────────────────────────────
 CLIENT_ORDER_PREFIX = "aof"  # tags this bot's orders so cleanup only touches
                              # its own orders, not everything on the account
+
+# ── Market data recording (replay) ─────────────────────────────────────────────
+# Records every bar and option quote the decision code receives to
+# recordings/session_YYYY-MM-DD.jsonl.gz (a few tens of MB per session,
+# written off the event loop). These recordings feed replay.py, which runs
+# the SAME live code paths deterministically — the only honest way to test
+# parameter changes without waiting one live session per calendar day.
+RECORD_MARKET_DATA = True
+RECORDINGS_DIR     = "recordings"
 
 # ── Polling ────────────────────────────────────────────────────────────────────
 SNAPSHOT_POLL_SEC  = 30    # how often to poll REST snapshot for proxy-delta calc

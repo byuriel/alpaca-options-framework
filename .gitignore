@@ -4,6 +4,8 @@
 
 # Logs and trade data
 logs/
+recordings/
+replay_out/
 
 # Python
 __pycache__/

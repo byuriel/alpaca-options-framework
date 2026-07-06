@@ -19,10 +19,10 @@ import datetime
 import json
 import logging
 import os
-import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+import clock
 import config
 from signals import ProxyDeltaTracker, Quote
 
@@ -98,7 +98,7 @@ class BotState:
     def update_option_quote(self, symbol: str, bid: float, ask: float, ts: datetime.datetime):
         quote = Quote(
             symbol=symbol, bid=bid, ask=ask, timestamp=ts,
-            recv_monotonic=time.monotonic(),
+            recv_monotonic=clock.monotonic(),
         )
         self.option_quotes[symbol] = quote
 
@@ -256,7 +256,7 @@ class BotState:
                 reason,
                 f"{realized_pnl:.2f}",
                 pos.entry_time.isoformat(),
-                datetime.datetime.now(tz=config.ET).isoformat(),
+                clock.now_et().isoformat(),
                 f"{fees:.2f}",
                 pos.order_id,
                 exit_order_id,
