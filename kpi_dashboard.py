@@ -22,6 +22,7 @@ import os
 import re
 
 import config
+import trade_stats
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR  = os.path.join(BASE_DIR, "logs")
@@ -194,6 +195,31 @@ def build(days: int, out_path: str):
     # which shifts every hour label when the report is built on a UTC host.
     by_hour   = group(lambda r: r["entry_dt"].astimezone(ET).hour)
 
+    # ── Uncertainty quantification (trade_stats — cluster bootstrap by day) ──
+    # A public track record that prints point estimates without confidence
+    # intervals is an invitation to self-deception; the stats layer gates
+    # every claim on sample size.
+    stats = trade_stats.compute_stats([
+        trade_stats.Trade(
+            date=r["date"], pnl=r["realized_pnl"], reason=r["reason"],
+            hold_secs=(r["exit_dt"] - r["entry_dt"]).total_seconds(),
+        ) for r in trades
+    ])
+    wr_lo, wr_hi = stats["win_rate_ci"]
+    ev_ci   = stats.get("ev_ci")
+    boot_p  = stats.get("ev_boot_p")
+    if not stats["sufficient"]:
+        edge_label, edge_cls = "SAMPLE TOO SMALL", "text-warning"
+    elif boot_p is not None and boot_p < 0.01 and ev > 0:
+        edge_label, edge_cls = "SIGNIFICANT", "text-success"
+    elif boot_p is not None and boot_p < 0.05 and ev > 0:
+        edge_label, edge_cls = "SUGGESTIVE", "text-warning"
+    else:
+        edge_label, edge_cls = "NOT DETECTED", "text-danger"
+    edge_sub = (f"boot p={boot_p:.3f}, EV CI [{ev_ci[0]:+.0f}, {ev_ci[1]:+.0f}]"
+                if boot_p is not None and ev_ci else
+                f"n={stats['n_trades']} trades / {stats['n_days']} days")
+
     # ── ORB shadow filter panel ──────────────────────────────────────────────
     shadow_days   = sorted({s["date"] for s in shadow})
     blocked       = []
@@ -242,10 +268,12 @@ def build(days: int, out_path: str):
     cards = "".join([
         card("Net P&L (actual)", fmt_usd(actual_pnl), f"{fmt_usd(pnl_total)} booked, {fmt_usd(ghost_pnl)} ghosts", pnl_cls),
         card("Trades", str(len(trades)), f"{len(wins)} W / {len(losses)} L"),
-        card("Win Rate", f"{win_rate:.1f}%", f"EV {fmt_usd(ev)}/trade",
+        card("Win Rate", f"{win_rate:.1f}%",
+             f"95% CI {wr_lo*100:.0f}–{wr_hi*100:.0f}% · EV {fmt_usd(ev)}",
              "text-success" if win_rate >= 50 else "text-warning"),
         card("Profit Factor", f"{pf:.2f}", f"avg W {fmt_usd(avg_win)} / L {fmt_usd(avg_loss)}",
              "text-success" if pf >= 1.5 else "text-warning"),
+        card("Statistical Edge", edge_label, edge_sub, edge_cls),
         card("Green Days", f"{green_days}/{len(dates)}", f"avg hold {avg_hold:.1f} min"),
         card("Ghost Events", str(len(ghosts)), f"net {fmt_usd(ghost_pnl)}",
              "text-warning" if ghosts else ""),
@@ -396,7 +424,10 @@ def build(days: int, out_path: str):
   </div>
 
   <div class="text-muted pb-4" style="font-size:0.7rem;">Paper trading on Alpaca.
-    Ghost events = duplicate fills recovered by the sweeper; included in actual P&L.</div>
+    Ghost events = duplicate fills recovered by the sweeper; included in actual P&L.
+    Confidence intervals: cluster bootstrap by session day ({stats['n_boot']} replicates,
+    deterministic seed) — trades within a day are dependent, so days are resampled, not
+    trades. Verdict: {html.escape(stats['verdict'])}</div>
 </div>
 
 <script>

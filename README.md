@@ -96,6 +96,8 @@ alpaca-options-framework/
 ├── sim_broker.py   Deterministic conservative execution model for replay
 ├── replay.py       Replay CLI — recorded sessions through the live handlers
 │
+├── trade_stats.py  Statistics layer — cluster bootstrap CIs, exact t/Wilson
+│                     inference, verdict tiers, paired sweep comparison
 ├── orb_filter.py   Clock-hour ORB directional regime filter (shadow mode)
 ├── kpi_dashboard.py  Self-contained HTML KPI report generator (see below)
 ├── tests/          Unit + async integration + replay-determinism tests
@@ -256,6 +258,49 @@ Scope, stated plainly: the simulated broker always resolves, so
 broker-failure paths (close retries, reconciliation, ghost sweeps) are
 covered by unit tests, not replay; live-only watchers (watchdog, staleness
 flatten) don't run. Replay measures the *strategy*, not the plumbing.
+
+---
+
+## Statistics Layer — Is There Actually an Edge?
+
+Point estimates lie at small samples. `trade_stats.py` answers the only
+question that matters — *is the edge statistically distinguishable from
+zero, and with what uncertainty?* — with methods chosen for small,
+dependent samples (all stdlib, deterministic for a given seed):
+
+```bash
+python trade_stats.py logs/                          # live track record
+python trade_stats.py replay_out/session_*/          # replay outputs
+python trade_stats.py --compare replay_out_base replay_out_variant \
+    --variants-tested 12                             # sweep comparison
+```
+
+- **Cluster bootstrap by session day.** Trades within a day share regime;
+  resampling individual trades understates variance. Days are resampled
+  with replacement, each carrying all its trades — intervals come out
+  wider, and honest.
+- **Exact small-sample inference.** Student-t p-values via the regularized
+  incomplete beta, Wilson score intervals for win rate — correct at n=20,
+  not just n=500.
+- **A sample-size gate.** Below 30 trades / 10 sessions the verdict is
+  "INSUFFICIENT SAMPLE — no statistical claim possible", not a noise
+  Sharpe with two decimal places.
+- **Verdict tiers**: SIGNIFICANT (p<0.01) / SUGGESTIVE (p<0.05) /
+  NO DETECTABLE EDGE — with the bootstrap p-value printed next to each.
+- **Sweep honesty.** `--compare` pairs variants on identical replayed
+  sessions (paired daily differences — far more power than unpaired) and
+  Bonferroni-adjusts for `--variants-tested K`: quoting the raw p-value of
+  the best of 12 sweeps is data mining, and the report prints the adjusted
+  number with an arrow telling you which one you may quote.
+- Report includes: EV/trade with CI, breakeven win rate at the realized
+  payoff asymmetry, profit factor CI, annualized Sharpe/Sortino with CI,
+  observed and day-resampled drawdown distribution (median / p95), SQN,
+  per-reason breakdown, and a "what this cannot tell you" footer.
+
+The KPI dashboard consumes the same module: its headline cards now carry a
+Wilson CI on win rate and a **Statistical Edge** card
+(SIGNIFICANT / SUGGESTIVE / NOT DETECTED / SAMPLE TOO SMALL) so the public
+track record makes no claim the sample can't support.
 
 ---
 
