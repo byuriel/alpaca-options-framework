@@ -56,15 +56,15 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from alpaca.data.enums import DataFeed
 from alpaca.trading.enums import AssetClass
 
 import clock
 import config
+import event_calendar
 import market_calendar
 import recorder as recorder_mod
 import strikes
-from feeds import FeedManager
+from feeds import FeedManager, option_feed, stock_feed
 from momentum import MomentumEngine, Bar
 from occ import parse_occ_expiry, parse_occ_symbol
 from orders import OrderManager
@@ -102,6 +102,7 @@ _ghost_sweep_lock: asyncio.Lock = None
 _foreign_positions_seen: set = set()   # out-of-scope positions logged once
 _recorder = None   # MarketDataRecorder — created in main() when enabled;
                    # stays None in replay (replay reads recordings, never writes)
+_blackout_announced = False   # event-blackout WARNING logged once, not per tick
 
 # ── Watchdog heartbeat ────────────────────────────────────────────────────────
 # Updated by _status_loop every iteration. Watchdog thread checks every 10s;
@@ -277,6 +278,16 @@ async def _evaluate_entry(symbol: str):
         if bot_state.position is not None or bot_state.entry_pending:
             return
         if not risk_manager.can_trade():
+            return
+
+        # Scheduled-event blackout (FOMC statement etc.) — risk gating, not
+        # an alpha filter; sits with the other risk gates, not in signals.
+        blackout = event_calendar.entry_blackout_reason(clock.now_et())
+        if blackout is not None:
+            global _blackout_announced
+            if not _blackout_announced:
+                _blackout_announced = True
+                logger.warning("EVENT BLACKOUT active: %s — no new entries", blackout)
             return
 
         side, strike = _current_subscriptions.get(symbol, (None, None))
@@ -1088,6 +1099,34 @@ async def _staleness_watcher():
                 risk_manager.lock("SPY bar stream stale")
 
 
+# ── Scheduled-event watcher ───────────────────────────────────────────────────
+
+async def _event_watcher():
+    """
+    On FOMC statement days, flattens any open position at FOMC_FLATTEN_TIME
+    (default 13:45 ET — 15 minutes before the 14:00 statement). Long 0DTE
+    gamma through the statement is a headline coin flip; the entry blackout
+    (13:30) stops NEW positions, this stops EXISTING ones. One-shot per day:
+    after the flatten window opens it keeps sweeping, so a position that
+    somehow appears later (recovery, race) is still flattened.
+    """
+    if not (config.EVENT_BLACKOUT_ENABLED and config.FOMC_FLATTEN_POSITIONS):
+        await asyncio.sleep(float("inf"))
+    if not event_calendar.is_fomc_day(config.today_et()):
+        await asyncio.sleep(float("inf"))
+    logger.info("Event watcher armed: FOMC day — flatten at %s ET, "
+                "entry blackout from %s ET",
+                config.FOMC_FLATTEN_TIME, config.FOMC_ENTRY_BLACKOUT_START)
+    while True:
+        await asyncio.sleep(5)
+        why = event_calendar.should_flatten_for_event(clock.now_et())
+        if why is None:
+            continue
+        if bot_state.position is not None and not bot_state.exit_pending:
+            logger.warning("EVENT FLATTEN: closing position ahead of %s", why)
+            await _execute_exit("event_flatten")
+
+
 # ── Task wrapper ───────────────────────────────────────────────────────────────
 
 async def _guarded(coro_factory, name: str, restart_delay: float = 5.0):
@@ -1299,6 +1338,37 @@ async def _confirm_flat_and_exit():
     os._exit(0)
 
 
+# ── Feed entitlement probe ────────────────────────────────────────────────────
+
+def _validate_feed_entitlements(stock_client, option_client, today):
+    """One cheap REST request per non-default feed. A missing subscription
+    surfaces here as a clear SystemExit, not a 09:30 stream failure."""
+    from alpaca.data.requests import StockLatestQuoteRequest, OptionChainRequest
+
+    if config.STOCK_FEED != "iex":
+        try:
+            stock_client.get_stock_latest_quote(StockLatestQuoteRequest(
+                symbol_or_symbols=config.UNDERLYING, feed=stock_feed()))
+            logger.info("Stock feed entitlement OK: %s", config.STOCK_FEED)
+        except Exception as e:
+            raise SystemExit(
+                f"Stock feed {config.STOCK_FEED!r} not available on this account "
+                f"({e}). Subscribe to Alpaca market data or set "
+                f"ALPACA_STOCK_FEED=iex.")
+    if config.OPTION_FEED != "indicative":
+        try:
+            option_client.get_option_chain(OptionChainRequest(
+                underlying_symbol=config.UNDERLYING, expiration_date=today,
+                feed=option_feed(),
+                strike_price_gte=1.0, strike_price_lte=2.0))   # tiny probe window
+            logger.info("Option feed entitlement OK: %s", config.OPTION_FEED)
+        except Exception as e:
+            raise SystemExit(
+                f"Option feed {config.OPTION_FEED!r} not available on this account "
+                f"({e}). Subscribe to Alpaca options data (OPRA) or set "
+                f"ALPACA_OPTION_FEED=indicative.")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
@@ -1347,12 +1417,40 @@ async def main():
             config.ENTRY_END, config.TIME_STOP, old_stop,
         )
 
+    # ── Scheduled events for this session ─────────────────────────────────────
+    events_today = event_calendar.todays_events(today)
+    if events_today:
+        logger.warning("SCHEDULED EVENTS today: %s", ", ".join(events_today))
+        if event_calendar.is_fomc_day(today) and config.EVENT_BLACKOUT_ENABLED:
+            logger.warning(
+                "FOMC day: entry blackout from %s ET%s",
+                config.FOMC_ENTRY_BLACKOUT_START,
+                f", flatten at {config.FOMC_FLATTEN_TIME} ET"
+                if config.FOMC_FLATTEN_POSITIONS else "",
+            )
+        if (event_calendar.premarket_events(today)
+                and config.PREMARKET_EVENT_OPEN_DELAY_MIN > 0):
+            h, m = map(int, config.ENTRY_START.split(":"))
+            shifted = (datetime.datetime.combine(today, datetime.time(h, m))
+                       + datetime.timedelta(minutes=config.PREMARKET_EVENT_OPEN_DELAY_MIN))
+            config.ENTRY_START = shifted.strftime("%H:%M")
+            logger.warning("Premarket event day: ENTRY_START delayed to %s ET",
+                           config.ENTRY_START)
+    else:
+        logger.info("No scheduled macro events today.")
+
     _market_open_event = asyncio.Event()
     risk_manager.reset_day()
     _restore_daily_pnl()   # replay today's closed trades after a restart
 
     stock_client  = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_API_SECRET)
     option_client = OptionHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_API_SECRET)
+
+    # ── Feed entitlement probe ────────────────────────────────────────────────
+    # Paid feeds (SIP/OPRA) fail at stream-connect time with an opaque error
+    # if the account lacks the market-data subscription. Probe cheaply NOW
+    # and fail with an actionable message instead of dying at 09:30.
+    _validate_feed_entitlements(stock_client, option_client, today)
 
     # Daily ATR baseline
     logger.info("Fetching daily ATR baseline...")
@@ -1375,7 +1473,7 @@ async def main():
             timeframe         = TimeFrame.Minute,
             start             = seed_start,
             end               = seed_end,
-            feed              = DataFeed.IEX,
+            feed              = stock_feed(),
         )
         raw = stock_client.get_stock_bars(seed_req)[config.UNDERLYING]
         raw = [b for b in raw
@@ -1407,6 +1505,9 @@ async def main():
                 "session_date":  today.isoformat(),
                 "baseline_atr":  _baseline_atr,
                 "paper":         config.PAPER,
+                "stock_feed":    config.STOCK_FEED,
+                "option_feed":   config.OPTION_FEED,
+                "events":        events_today,
                 "config":        {k: v for k, v in vars(config).items()
                                   if k.isupper()
                                   and isinstance(v, (int, float, str, bool))},
@@ -1558,6 +1659,7 @@ async def main():
         _guarded(_resubscribe_watcher,  "resubscribe_watcher"),
         _guarded(_exit_monitor,         "exit_monitor"),
         _guarded(_staleness_watcher,    "staleness_watcher"),
+        _guarded(_event_watcher,        "event_watcher"),
         _guarded(_status_loop,          "status_loop"),
         _guarded(_time_stop_watcher,    "time_stop_watcher"),
         return_exceptions=True,

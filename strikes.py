@@ -21,9 +21,9 @@ from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.requests import OptionChainRequest
-from alpaca.data.enums import DataFeed
 
 import config
+from feeds import option_feed, stock_feed
 from occ import build_occ_symbol
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ def _atr_5day(stock_client: StockHistoricalDataClient) -> float:
         timeframe=TimeFrame.Day,
         start=start,
         end=end,
-        feed=DataFeed.IEX,
+        feed=stock_feed(),
     )
     bars = stock_client.get_stock_bars(req)[config.UNDERLYING]
     # Exclude today's PARTIAL bar by date, not by blind slicing — the old
@@ -70,7 +70,7 @@ def _atr_5day(stock_client: StockHistoricalDataClient) -> float:
 
 
 def _current_spy_price(stock_client: StockHistoricalDataClient) -> float:
-    req    = StockLatestQuoteRequest(symbol_or_symbols=config.UNDERLYING, feed=DataFeed.IEX)
+    req    = StockLatestQuoteRequest(symbol_or_symbols=config.UNDERLYING, feed=stock_feed())
     quotes = stock_client.get_stock_latest_quote(req)
     q      = quotes[config.UNDERLYING]
     if q.bid_price and q.ask_price and q.bid_price > 0 and q.ask_price > 0:
@@ -104,6 +104,7 @@ def prime_chain_cache(option_client: OptionHistoricalDataClient,
             underlying_symbol=config.UNDERLYING,
             expiration_date=expiry,
             type=side,
+            feed=option_feed(),
         )
         try:
             chain = option_client.get_option_chain(req)

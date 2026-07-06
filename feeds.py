@@ -15,12 +15,36 @@ import logging
 from typing import Callable, List
 
 from alpaca.data.live import StockDataStream, OptionDataStream
-from alpaca.data.enums import DataFeed
+from alpaca.data.enums import DataFeed, OptionsFeed
 from alpaca.trading.stream import TradingStream
 
 import config
 
 logger = logging.getLogger(__name__)
+
+_STOCK_FEEDS  = {"iex": DataFeed.IEX, "sip": DataFeed.SIP}
+_OPTION_FEEDS = {"indicative": OptionsFeed.INDICATIVE, "opra": OptionsFeed.OPRA}
+
+
+def stock_feed() -> DataFeed:
+    """Configured stock feed enum — single mapping point for streams AND
+    historical requests, so live signals and preseed/ATR data can never
+    silently come from different tapes."""
+    try:
+        return _STOCK_FEEDS[config.STOCK_FEED]
+    except KeyError:
+        raise SystemExit(
+            f"Unknown ALPACA_STOCK_FEED={config.STOCK_FEED!r} — "
+            f"use one of {sorted(_STOCK_FEEDS)}")
+
+
+def option_feed() -> OptionsFeed:
+    try:
+        return _OPTION_FEEDS[config.OPTION_FEED]
+    except KeyError:
+        raise SystemExit(
+            f"Unknown ALPACA_OPTION_FEED={config.OPTION_FEED!r} — "
+            f"use one of {sorted(_OPTION_FEEDS)}")
 
 
 class FeedManager:
@@ -37,12 +61,15 @@ class FeedManager:
         self._stock_stream = StockDataStream(
             api_key    = config.ALPACA_API_KEY,
             secret_key = config.ALPACA_API_SECRET,
-            feed       = DataFeed.IEX,
+            feed       = stock_feed(),
         )
         self._option_stream = OptionDataStream(
             api_key    = config.ALPACA_API_KEY,
             secret_key = config.ALPACA_API_SECRET,
+            feed       = option_feed(),
         )
+        logger.info("Data feeds: stock=%s options=%s",
+                    config.STOCK_FEED, config.OPTION_FEED)
         self._trading_stream = TradingStream(
             api_key    = config.ALPACA_API_KEY,
             secret_key = config.ALPACA_API_SECRET,

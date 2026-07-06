@@ -120,6 +120,39 @@ class TestEndToEnd:
         # live clock back in charge: today_et is the real today, not 2026-07-06
         assert clock.today_et() == datetime.datetime.now(tz=ET).date()
 
+    def test_fomc_day_flattens_before_statement(self, tmp_path):
+        # Same session shape but dated 2026-01-28 (an FOMC statement day,
+        # Wednesday). The position enters at 09:47, never reaches TP or
+        # stop, and a quote arrives after 13:45 — the replayed event
+        # watcher must flatten it ahead of the 14:00 statement.
+        fomc = datetime.date(2026, 1, 28)
+        sym  = build_occ_symbol("SPY", fomc, "CALL", 604.0)
+
+        def w(hh, mm, ss=0):
+            return datetime.datetime(2026, 1, 28, hh, mm, ss, tzinfo=ET).timestamp()
+
+        events = []
+        for i in range(17):
+            close  = 600.0 + 0.2 * i
+            bar_ts = datetime.datetime(2026, 1, 28, 9, 30 + i, tzinfo=ET)
+            events.append(["b", w(9, 31 + i), bar_ts.isoformat(),
+                           close - 0.2, close + 0.1, close - 0.5, close, 10_000.0])
+        events += [
+            ["q", w(9, 47, 5),   sym, 0.48, 0.52, ""],
+            ["q", w(9, 47, 7),   sym, 0.49, 0.51, ""],   # entry fills @ 0.51
+            ["q", w(10, 30, 0),  sym, 0.55, 0.59, ""],   # drifts, no TP/stop
+            ["q", w(13, 46, 0),  sym, 0.56, 0.60, ""],   # past 13:45 → flatten
+        ]
+        path = str(tmp_path / "session_2026-01-28.jsonl.gz")
+        _write_recording(path, events,
+                         meta={"session_date": fomc.isoformat(), "baseline_atr": 1.0})
+
+        summary = run_session(path, str(tmp_path / "out"))
+        assert summary["trades"] == 1
+        assert summary["rows"][0]["reason"] == "event_flatten"
+        # flattened at the last executable bid before the statement
+        assert float(summary["rows"][0]["exit_price"]) in (0.55, 0.56)
+
 
 class TestRecorderRoundTrip:
     def test_write_read_roundtrip(self, tmp_path):

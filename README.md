@@ -88,6 +88,7 @@ alpaca-options-framework/
 ├── strikes.py      ATR calculation, dynamic strike selection, chain validation
 ├── occ.py          OCC symbol build/parse (stdlib-pure, unit-tested)
 ├── market_calendar.py  NYSE holidays + early closes — session-derived time stop
+├── event_calendar.py   FOMC/CPI/NFP blackout — entry blocks + pre-statement flatten
 ├── momentum.py     EMA5/EMA20, VWAP, ROC5, atr5, consecutive bar engine
 │                     (session stats strictly RTH — premarket feeds EMAs only)
 │
@@ -215,6 +216,14 @@ At 3:25 PM ET (time stop watcher):
   *refuses to start* (loud `SystemExit`) rather than guess at holidays, and
   it warns at startup for 30 days before the edge. Extending the tables is a
   two-minute edit — do it before January of the first uncovered year.
+- **Macro-event blackout** (`event_calendar.py`). The FOMC statement drops
+  at 14:00 ET — inside the entry window. On statement days, new entries are
+  blocked from 13:30 and any open position is flattened at 13:45 (both
+  configurable; replay honors them too, so backtested FOMC days behave like
+  live ones). Premarket releases (CPI/NFP) are announced at startup and
+  observe-only by default — shadow first, gate later. FOMC dates ship for
+  2025–2026 (2027 tentative); the CPI table must be maintained from the BLS
+  schedule and is deliberately harmless until you flip gating on.
 
 All exits are logged to `logs/trades_YYYY-MM-DD.csv` with entry/exit price,
 quantity, reason, **P&L net of regulatory fees**, order IDs (reconcilable
@@ -351,6 +360,42 @@ Push the output to any static host (GitHub Pages works fine) for a public, auto-
 Pre-seeded with the last 30 historical RTH 1-min bars at startup so all indicators are meaningful from the first live bar.
 
 BULL / BEAR / NEUTRAL direction is derived by combining all five — see `momentum.py` for the exact conditions.
+
+---
+
+## Data Feeds — IEX/Indicative vs SIP/OPRA
+
+The free Alpaca tiers (`iex` stocks, `indicative` options) are what the bot
+uses by default — fine for paper trading and development. But IEX carries
+~2–3% of consolidated stock volume and the indicative options feed is
+sampled: signals, stops, and `peak_mid` are only as good as the tape they
+watch. **For live capital, use the paid feeds:**
+
+```bash
+# .env (requires the Alpaca market-data subscription)
+ALPACA_STOCK_FEED=sip      # full consolidated tape
+ALPACA_OPTION_FEED=opra    # full options NBBO
+```
+
+One switch changes everything consistently — live streams, historical
+requests (ATR baseline, momentum preseed), and the chain cache all route
+through the same mapping, so signals and seed data can never come from
+different tapes. Startup probes the entitlement with one cheap REST request
+and fails fast with an actionable message if the account lacks the
+subscription, instead of dying at 09:30 with an opaque stream error. The
+feeds in use are stamped into every session recording's metadata.
+
+---
+
+## Backtesting
+
+Recorded-session replay (above) covers every day from the moment you start
+running the bot. For testing against *historical* periods before that, see
+[`BACKTESTING.md`](./BACKTESTING.md) — the assessment of what exists and the
+proposed design: a `backfill.py` that reconstructs recording files from
+Alpaca's historical data so the **same replay engine** becomes a full
+backtester, with fidelity tiers and a reconstruction-error acceptance test
+against live-captured ground truth.
 
 ---
 

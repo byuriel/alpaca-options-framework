@@ -53,6 +53,28 @@ def validate_credentials():
 # ── Universe ───────────────────────────────────────────────────────────────────
 UNDERLYING        = "SPY"
 
+# ── Data feeds ─────────────────────────────────────────────────────────────────
+# iex/indicative are Alpaca's free tiers: IEX is ~2–3% of consolidated stock
+# volume and the indicative options feed is sampled — fine for paper and
+# development, NOT for live capital. With the paid Alpaca market-data
+# subscription set ALPACA_STOCK_FEED=sip and ALPACA_OPTION_FEED=opra (full
+# consolidated tape / full options NBBO). Startup probes the entitlement and
+# fails fast with an actionable message if the account lacks the
+# subscription, instead of dying at 09:30 with a stream error.
+STOCK_FEED  = os.environ.get("ALPACA_STOCK_FEED", "iex").strip().lower()        # iex | sip
+OPTION_FEED = os.environ.get("ALPACA_OPTION_FEED", "indicative").strip().lower()  # indicative | opra
+
+# ── Scheduled macro events (event_calendar.py) ─────────────────────────────────
+# FOMC statement drops at 14:00 ET — inside the entry window. Holding fresh
+# long 0DTE gamma into it is a headline bet, not the strategy. Risk gating,
+# on by default; premarket events (CPI/NFP) are observe-only by default.
+EVENT_BLACKOUT_ENABLED    = True
+FOMC_ENTRY_BLACKOUT_START = "13:30"  # ET — no new entries from here on FOMC days
+FOMC_FLATTEN_POSITIONS    = True     # close any open position before the statement
+FOMC_FLATTEN_TIME         = "13:45"  # ET — flatten deadline on FOMC days
+PREMARKET_EVENT_OPEN_DELAY_MIN = 0   # >0 pushes ENTRY_START later on CPI/NFP days
+                                     # (0 = observe-only; validate in shadow first)
+
 # ── Strike selection ───────────────────────────────────────────────────────────
 # Target strike = round(SPY_price + min(ATR_MULT * ATR_5day, MAX_STRIKE_OFFSET)) to nearest STRIKE_STEP
 ATR_MULT          = 0.60   # strike offset as multiple of 5-day daily ATR

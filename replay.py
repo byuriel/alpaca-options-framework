@@ -43,6 +43,7 @@ from typing import Optional
 
 import clock
 import config
+import event_calendar
 import market_calendar
 import recorder
 import state as state_mod
@@ -140,6 +141,7 @@ async def _run(rec_path: str, out_dir: str) -> dict:
         main._ghost_sweep_lock       = asyncio.Lock()
         main._current_subscriptions  = {}
         main._foreign_positions_seen = set()
+        main._blackout_announced     = False
         main._open_bar_strikes       = {}
         main._baseline_atr           = float(meta.get("baseline_atr", 3.0))
 
@@ -160,6 +162,15 @@ async def _run(rec_path: str, out_dir: str) -> dict:
 
         for ev in events:
             sim.advance_to(float(ev[1]))
+
+            # Scheduled-event flatten — same trigger the live event watcher
+            # fires on; replayed FOMC days must behave like live ones
+            flatten_why = event_calendar.should_flatten_for_event(sim.now_et())
+            if (flatten_why is not None
+                    and main.bot_state.position is not None
+                    and not main.bot_state.exit_pending):
+                await main._execute_exit("event_flatten")
+                await _drain()
 
             # Session time stop — same trigger the live watcher fires on
             if sim.now_et().strftime("%H:%M") >= config.TIME_STOP:
