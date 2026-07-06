@@ -81,7 +81,14 @@ ATR_MULT          = 0.60   # strike offset as multiple of 5-day daily ATR
 MAX_STRIKE_OFFSET = 4.50   # hard cap — prevents elevated ATR from placing strikes
                             # so far OTM that SPY never reaches the approach zone
 STRIKE_STEP       = 0.50   # SPY strikes are in $0.50 increments near the money
-STRIKE_ALTS       = 10     # extra strikes above/below — wide window, never resubscribe
+STRIKE_ALTS       = 6      # extra strikes above/below the target, each side.
+                            # Total subscribed = (2*ALTS+1)*2 option symbols.
+                            # 6 → 26 symbols, under Alpaca's free-plan 30-symbol
+                            # WebSocket cap (run feed_monitor.py after a session
+                            # to confirm zero dark symbols). On the paid feed
+                            # (OPRA, no symbol cap) widen back to 10 for a bigger
+                            # no-resubscribe window. ±$3 here matches the ±$3
+                            # re-subscribe trigger, so nothing is lost at 6.
 
 # ── Entry filters ──────────────────────────────────────────────────────────────
 # NOTE: these times are defined relative to a regular 16:00 ET close. On
