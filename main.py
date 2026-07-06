@@ -65,6 +65,7 @@ import clock
 import config
 import event_calendar
 import market_calendar
+import monitor as monitor_mod
 import recorder as recorder_mod
 import reconcile as reconcile_mod
 import restart_guard
@@ -108,6 +109,8 @@ _foreign_positions_seen: set = set()   # out-of-scope positions logged once
 _recorder = None   # MarketDataRecorder — created in main() when enabled;
                    # stays None in replay (replay reads recordings, never writes)
 _blackout_announced = False   # event-blackout WARNING logged once, not per tick
+_events_today: list = []      # scheduled macro events — set in main(), read by monitor
+_trades_cache = {"key": None, "rows": []}   # (mtime,size)-keyed CSV cache for monitor
 
 # ── Watchdog heartbeat ────────────────────────────────────────────────────────
 # Updated by _status_loop every iteration. Watchdog thread checks every 10s;
@@ -1184,6 +1187,125 @@ async def _event_watcher():
             await _execute_exit("event_flatten")
 
 
+# ── Monitor snapshot (read-only — serialized to the web monitor) ─────────────
+
+def _monitor_trades_today() -> list:
+    """Today's closed trades for the monitor, cached on (mtime, size) so the
+    2-second poll doesn't reread an unchanged file."""
+    today = config.today_et().isoformat()
+    path  = os.path.join(config.LOG_DIR, f"trades_{today}.csv")
+    try:
+        st  = os.stat(path)
+        key = (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return []
+    if _trades_cache["key"] == key:
+        return _trades_cache["rows"]
+    rows = []
+    try:
+        with open(path, newline="") as f:
+            for r in csv.DictReader(f):
+                if r.get("date") != today:
+                    continue
+                try:
+                    t = datetime.datetime.fromisoformat(
+                        r["exit_time"]).astimezone(config.ET).strftime("%H:%M:%S")
+                except (KeyError, ValueError):
+                    t = ""
+                rows.append({
+                    "time": t, "symbol": r.get("symbol", ""),
+                    "side": r.get("side", ""),
+                    "qty": int(float(r.get("qty", 0) or 0)),
+                    "entry": float(r.get("entry_price", 0) or 0),
+                    "exit": float(r.get("exit_price", 0) or 0),
+                    "reason": r.get("reason", ""),
+                    "pnl": float(r.get("realized_pnl", 0) or 0),
+                })
+    except OSError:
+        return []
+    _trades_cache["key"], _trades_cache["rows"] = key, rows
+    return rows
+
+
+def _monitor_snapshot() -> dict:
+    """Everything the web monitor shows, in one dict. Runs on the monitor's
+    thread — reads only, snapshots object references before use, and never
+    raises (monitor.py wraps it anyway; belt and suspenders)."""
+    now_m = clock.monotonic()
+    m     = momentum_engine.state
+    pos   = bot_state.position          # local ref — may be swapped to None
+
+    quote = bot_state.get_quote(pos.symbol) if pos else None
+    position = None
+    if pos is not None:
+        mid = quote.mid if quote else pos.entry_price
+        trail_armed = pos.peak_mid >= pos.entry_price * config.PEAK_TRAIL_ACTIVATE
+        spy_stop = None
+        if pos.entry_spy_price > 0:
+            buf = max(config.SPY_STOP_FLOOR,
+                      config.SPY_STOP_ATR_MULT * pos.entry_atr5)
+            spy_stop = (pos.entry_spy_price - buf if pos.side == "call"
+                        else pos.entry_spy_price + buf)
+        position = {
+            "symbol": pos.symbol, "side": pos.side, "strike": pos.strike,
+            "qty": pos.qty_remaining, "entry": pos.entry_price, "mid": mid,
+            "pct": (mid / pos.entry_price - 1) * 100 if pos.entry_price else 0.0,
+            "unreal_pnl": (mid - pos.entry_price) * pos.qty_remaining * 100,
+            "tp": pos.entry_price * config.TP_MULT,
+            "stop": pos.entry_price * config.STOP_MULT,
+            "trail_armed": trail_armed,
+            "trail_stop": pos.peak_mid * config.PEAK_TRAIL_PCT,
+            "trail_arms_at": pos.entry_price * config.PEAK_TRAIL_ACTIVATE,
+            "peak": pos.peak_mid, "spy_stop": spy_stop,
+            "age_s": (clock.now_et() - pos.entry_time).total_seconds(),
+            "min_unreal": pos.min_unreal_pnl, "max_unreal": pos.max_unreal_pnl,
+        }
+
+    quote_age = (now_m - quote.recv_monotonic
+                 if quote and quote.recv_monotonic > 0 else None)
+    bar_age   = (now_m - bot_state.last_bar_monotonic
+                 if bot_state.last_bar_monotonic > 0 else None)
+
+    return {
+        "ts_et": clock.now_et().strftime("%H:%M:%S"),
+        "paper": config.PAPER,
+        "feeds": {"stock": config.STOCK_FEED, "option": config.OPTION_FEED},
+        "session": {
+            "entry_start": config.ENTRY_START, "entry_end": config.ENTRY_END,
+            "time_stop": config.TIME_STOP,
+            "market_open": bool(_market_open_event and _market_open_event.is_set()),
+            "events": list(_events_today),
+        },
+        "spy": {
+            "price": bot_state.spy_price, "direction": m.direction,
+            "ema5": m.ema5, "ema20": m.ema20, "vwap": m.vwap,
+            "roc5": m.roc5, "atr5": m.atr5,
+            "consec": m.consec_green or -m.consec_red,
+        },
+        "position": position,
+        "risk": {
+            "daily_pnl": risk_manager.daily_pnl,
+            "week_pnl": risk_manager.week_pnl,
+            "trades_today": risk_manager.trades_today,
+            "locked": risk_manager.locked,
+            "lock_reason": risk_manager.lock_reason,
+            "cooldown_bars": getattr(risk_manager, "_cooldown_bars", 0),
+        },
+        "limits": {"weekly": config.WEEKLY_MAX_LOSS,
+                   "stale_quote": config.STALE_QUOTE_FLATTEN_SEC},
+        "safety": {
+            "quote_age_s": quote_age, "bar_age_s": bar_age,
+            "entry_pending": bot_state.entry_pending,
+            "exit_pending": bot_state.exit_pending,
+            "blackout": event_calendar.entry_blackout_reason(clock.now_et()),
+        },
+        "subs": len(_current_subscriptions),
+        "recorder": {"active": _recorder is not None,
+                     "dropped": _recorder.dropped if _recorder else 0},
+        "trades": _monitor_trades_today(),
+    }
+
+
 # ── Task wrapper ───────────────────────────────────────────────────────────────
 
 async def _guarded(coro_factory, name: str, restart_delay: float = 5.0):
@@ -1530,7 +1652,9 @@ async def main():
         )
 
     # ── Scheduled events for this session ─────────────────────────────────────
+    global _events_today
     events_today = event_calendar.todays_events(today)
+    _events_today = events_today   # exposed to the web monitor
     if events_today:
         logger.warning("SCHEDULED EVENTS today: %s", ", ".join(events_today))
         if event_calendar.is_fomc_day(today) and config.EVENT_BLACKOUT_ENABLED:
@@ -1767,6 +1891,11 @@ async def main():
                 restart_guard.record_restart()   # storm brake counts these
                 _time.sleep(1)   # let the log flush
                 os.execl(sys.executable, sys.executable, *sys.argv)
+
+    # ── Live web monitor (read-only, localhost by default) ───────────────────
+    monitor_mod.MonitorServer(
+        _monitor_snapshot, host=config.MONITOR_HOST, port=config.MONITOR_PORT,
+    ).start()
 
     threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
     logger.info(

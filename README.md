@@ -105,6 +105,7 @@ alpaca-options-framework/
 │                     spread stats, held-symbol staleness analysis
 ├── alerts.py       Critical-event alerting — webhook/email on kill switches,
 │                     exit failures, reconciliation mismatches
+├── monitor.py      Live web monitor — read-only browser status page (localhost)
 ├── orb_filter.py   Clock-hour ORB directional regime filter (shadow mode)
 ├── kpi_dashboard.py  Self-contained HTML KPI report generator (see below)
 ├── tests/          Unit + async integration + replay-determinism tests
@@ -171,6 +172,16 @@ The bot waits for 9:30 ET, subscribes options at the actual open price, and beco
 - `q + Enter` — quit cleanly (closes all positions)
 - `r + Enter` — restart (leaves positions open, recovers on next start)
 - `t + Enter` — print today's trade table
+
+**Live web monitor:** while the bot runs, open **http://127.0.0.1:8080** in
+any browser — position with ticking unrealized P&L, momentum state, risk
+gates, kill-switch ages, event blackouts, and today's trades, refreshing
+every 2 seconds. **Read-only by construction** (two GET endpoints, every
+write method rejected — it observes the bot and cannot act on it), served
+from a daemon thread that never touches the trading path, bound to
+localhost only by default (`MONITOR_HOST`/`MONITOR_PORT` in `.env`;
+`MONITOR_PORT=0` disables). Stdlib and self-contained — no dependencies,
+no CDN.
 
 ---
 

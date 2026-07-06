@@ -211,5 +211,12 @@ CLIENT_ORDER_PREFIX = "aof"  # tags this bot's orders so cleanup only touches
 RECORD_MARKET_DATA = True
 RECORDINGS_DIR     = "recordings"
 
+# ── Live web monitor ───────────────────────────────────────────────────────────
+# Read-only status page served from inside the bot (monitor.py). Binds
+# localhost only by default — a monitoring page on a trading process is not
+# something to expose to a network casually. MONITOR_PORT=0 disables.
+MONITOR_HOST = os.environ.get("MONITOR_HOST", "127.0.0.1")
+MONITOR_PORT = int(os.environ.get("MONITOR_PORT", "8080") or 0)
+
 # ── Polling ────────────────────────────────────────────────────────────────────
 SNAPSHOT_POLL_SEC  = 30    # how often to poll REST snapshot for proxy-delta calc
