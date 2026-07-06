@@ -74,6 +74,40 @@ class TestDailyLossGate:
         assert rm.locked is True
 
 
+class TestWeeklyLimit:
+    def test_week_baseline_plus_daily_locks_at_limit(self):
+        rm = _rm()
+        rm.set_week_baseline(-(config.WEEKLY_MAX_LOSS - 50.0))
+        assert rm.locked is False
+        rm.record_trade(-50.0)                 # week total hits the line
+        assert rm.locked is True
+        assert "WEEKLY" in rm.lock_reason
+
+    def test_already_breached_week_locks_at_startup(self):
+        rm = _rm()
+        rm.set_week_baseline(-config.WEEKLY_MAX_LOSS - 1.0)
+        assert rm.locked is True
+
+    def test_prospective_weekly_gate_blocks_entry(self):
+        # Enough weekly headroom for the day gate but not the week gate
+        rm = _rm()
+        rm.set_week_baseline(
+            -(config.WEEKLY_MAX_LOSS - config.MAX_RISK_PER_TRADE))
+        assert rm.can_trade() is False
+
+    def test_weekly_headroom_allows_trading(self):
+        rm = _rm()
+        rm.set_week_baseline(
+            -(config.WEEKLY_MAX_LOSS - config.MAX_RISK_PER_TRADE - 1.0))
+        assert rm.can_trade() is True
+
+    def test_profitable_week_no_effect(self):
+        rm = _rm()
+        rm.set_week_baseline(500.0)
+        assert rm.can_trade() is True
+        assert rm.week_pnl == 500.0
+
+
 class TestCooldown:
     def test_cooldown_blocks_then_expires(self):
         rm = _rm()

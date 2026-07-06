@@ -18,8 +18,9 @@ Flow:
          quote handler chain; a blocked handler would leave the just-opened
          position's exits blind during its riskiest first seconds
   4. _exit_monitor: 30-second safety net in case quotes stop arriving
-  5. _staleness_watcher: kill switch — flattens if quotes for the held symbol
-     go silent, locks new entries if the bar stream dies
+  5. _safety_watcher: kill switches — flattens if quotes for the held symbol
+     go silent (staleness) or the executable bid collapses through the
+     catastrophic backstop; locks new entries if the bar stream dies
   6. _time_stop_watcher: force-close all positions at the session-derived
      time stop (re-anchored on early-close days)
 
@@ -66,6 +67,7 @@ import event_calendar
 import market_calendar
 import recorder as recorder_mod
 import reconcile as reconcile_mod
+import restart_guard
 import strikes
 from feeds import FeedManager, option_feed, stock_feed
 from momentum import MomentumEngine, Bar
@@ -509,6 +511,27 @@ def _restore_daily_pnl():
         risk_manager.restore_day(daily_pnl, trades_today)
     else:
         logger.info("No trades found in CSV for today — starting fresh.")
+
+
+def _restore_week_baseline():
+    """Sum realized P&L from this week's EARLIER sessions (Mon..yesterday,
+    ET) so the weekly loss limit sees the whole week, not just today."""
+    today = config.today_et()
+    week_start = today - datetime.timedelta(days=today.weekday())   # Monday
+    prior = 0.0
+    d = week_start
+    while d < today:
+        path = os.path.join(config.LOG_DIR, f"trades_{d.isoformat()}.csv")
+        if os.path.exists(path):
+            try:
+                with open(path, newline="") as f:
+                    for row in csv.DictReader(f):
+                        if row.get("date") == d.isoformat():
+                            prior += float(row.get("realized_pnl", 0) or 0)
+            except Exception as e:
+                logger.warning("Week baseline: could not read %s: %s", path, e)
+        d += datetime.timedelta(days=1)
+    risk_manager.set_week_baseline(prior)
 
 
 # ── Position recovery (called at startup after a restart) ─────────────────────
@@ -1044,9 +1067,24 @@ async def _exit_monitor():
         asyncio.create_task(_evaluate_exit(quote))
 
 
-# ── Data staleness kill switch ────────────────────────────────────────────────
+# ── Safety watcher: staleness kill switch + catastrophic backstop ─────────────
 
-async def _staleness_watcher():
+def _catastrophic_breach(pos, quote) -> bool:
+    """
+    The dumbest possible loss rule, deliberately evaluated on an INDEPENDENT
+    code path from the quote-driven exits: if the executable BID is at or
+    below CAT_STOP_MULT × entry, the position must not exist. Redundant with
+    the normal stop by design — a defect, regression, or task starvation in
+    the quote-handler exit path can never leave a collapsing position
+    unbounded, because this 5-second sweep asks one question with no other
+    logic to get wrong.
+    """
+    if pos is None or quote is None or quote.bid <= 0:
+        return False
+    return quote.bid <= pos.entry_price * config.CAT_STOP_MULT
+
+
+async def _safety_watcher():
     """
     The exit monitor re-evaluates CACHED quotes — if the option stream dies
     silently (no exception, just no messages), it chews the same stale quote
@@ -1056,6 +1094,8 @@ async def _staleness_watcher():
       - Holding + no fresh quote for the held symbol in
         STALE_QUOTE_FLATTEN_SEC → flatten via _execute_exit ("stale_data").
         close_position() needs no quotes, so this works even with a dead feed.
+      - Holding + executable bid at/below CAT_STOP_MULT × entry → flatten
+        ("cat_stop") — see _catastrophic_breach.
       - No SPY bar in STALE_BAR_WARN_SEC during the session → lock new
         entries (bars drive the SPY stop and the ghost sweeper) and log
         CRITICAL. Existing quote-driven exits keep working.
@@ -1073,7 +1113,14 @@ async def _staleness_watcher():
         pos = bot_state.position
         if pos is not None and not bot_state.exit_pending:
             q = bot_state.get_quote(pos.symbol)
-            if q is not None and q.recv_monotonic > 0:
+            if _catastrophic_breach(pos, q):
+                logger.critical(
+                    "CATASTROPHIC BACKSTOP: %s bid=%.2f <= %.0f%% of entry %.2f "
+                    "— flattening (independent of quote-driven exits)",
+                    pos.symbol, q.bid, config.CAT_STOP_MULT * 100, pos.entry_price,
+                )
+                await _execute_exit("cat_stop")
+            elif q is not None and q.recv_monotonic > 0:
                 no_quote_since = 0.0
                 age = now_m - q.recv_monotonic
                 if age > config.STALE_QUOTE_FLATTEN_SEC:
@@ -1404,6 +1451,36 @@ async def main():
             "Alerting NOT configured (no ALERT_WEBHOOK_URL / ALERT_EMAIL_TO) — "
             "kill-switch events will only appear in this log.")
 
+    # ── Restart-storm brake ───────────────────────────────────────────────────
+    # One watchdog restart is recovery; several within an hour is a failure
+    # loop re-entering the same defect. Flatten, halt, alert, refuse to run.
+    halt_reason = restart_guard.halt_active()
+    if halt_reason:
+        logger.critical(
+            "HALTED: %s — investigate, then clear with: "
+            "python restart_guard.py --clear", halt_reason,
+        )
+        alerts.flush()
+        raise SystemExit("halted by restart-storm brake")
+    n_restarts = restart_guard.restarts_in_window()
+    if n_restarts >= config.RESTART_STORM_MAX:
+        reason = (f"restart storm: {n_restarts} watchdog restarts within "
+                  f"{config.RESTART_STORM_WINDOW_SEC // 60} min")
+        restart_guard.trigger_halt(reason)
+        logger.critical("RESTART STORM — flattening and halting: %s", reason)
+        for p in order_manager.get_open_positions():
+            try:
+                if (p.asset_class == AssetClass.US_OPTION
+                        and str(p.symbol).startswith(config.UNDERLYING)
+                        and parse_occ_expiry(str(p.symbol)) == config.today_et()):
+                    order_manager.emergency_close_sync(
+                        str(p.symbol), int(float(p.qty)))
+            except Exception as e:
+                logger.critical("Storm flatten failed for %s: %s — "
+                                "*** CLOSE MANUALLY ***", getattr(p, "symbol", "?"), e)
+        alerts.flush()
+        raise SystemExit(reason)
+
     # ── Reconciliation gate ───────────────────────────────────────────────────
     # A failed nightly reconciliation means the local record and the broker
     # disagree. Trading does not resume on top of unexplained numbers.
@@ -1476,7 +1553,8 @@ async def main():
 
     _market_open_event = asyncio.Event()
     risk_manager.reset_day()
-    _restore_daily_pnl()   # replay today's closed trades after a restart
+    _restore_daily_pnl()      # replay today's closed trades after a restart
+    _restore_week_baseline()  # weekly loss limit sees Mon..yesterday too
 
     stock_client  = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_API_SECRET)
     option_client = OptionHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_API_SECRET)
@@ -1686,6 +1764,7 @@ async def main():
                 alerts.alert(f"WATCHDOG restart: event loop silent {stale:.0f}s — "
                              "restarting; position (if any) recovers on startup")
                 alerts.flush(2.0)
+                restart_guard.record_restart()   # storm brake counts these
                 _time.sleep(1)   # let the log flush
                 os.execl(sys.executable, sys.executable, *sys.argv)
 
@@ -1701,7 +1780,7 @@ async def main():
         _guarded(_option_subscriber,    "option_subscriber"),
         _guarded(_resubscribe_watcher,  "resubscribe_watcher"),
         _guarded(_exit_monitor,         "exit_monitor"),
-        _guarded(_staleness_watcher,    "staleness_watcher"),
+        _guarded(_safety_watcher,       "safety_watcher"),
         _guarded(_event_watcher,        "event_watcher"),
         _guarded(_status_loop,          "status_loop"),
         _guarded(_time_stop_watcher,    "time_stop_watcher"),

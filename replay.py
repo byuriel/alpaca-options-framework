@@ -182,7 +182,10 @@ async def _run(rec_path: str, out_dir: str) -> dict:
             pos = main.bot_state.position
             if pos is not None and not main.bot_state.exit_pending:
                 q = main.bot_state.get_quote(pos.symbol)
-                if (q is not None and q.recv_monotonic > 0
+                if main._catastrophic_breach(pos, q):
+                    await main._execute_exit("cat_stop")
+                    await _drain()
+                elif (q is not None and q.recv_monotonic > 0
                         and sim.monotonic() - q.recv_monotonic
                         > config.STALE_QUOTE_FLATTEN_SEC):
                     await main._execute_exit("stale_data")

@@ -313,6 +313,21 @@ Exits non-zero below 90% coverage so cron can alert. Run it on indicative
 sessions now and OPRA sessions later — the diff is the measured cost of the
 free feed.
 
+**Restart-storm brake** (`restart_guard.py`) — one watchdog restart is
+recovery; several within an hour is a failure loop re-entering the same
+defect with a position possibly open. At 3 watchdog restarts/hour the bot
+flattens its positions via REST, writes a halt flag, alerts, and refuses to
+run until `python restart_guard.py --clear`. The counter is file-based —
+it survives the very restarts it counts.
+
+**Catastrophic backstop + weekly limit** — two last-line risk rules:
+`CAT_STOP_MULT` (bid ≤ 20% of entry → flatten) runs on the 5-second safety
+watcher, an *independent* code path from the quote-driven exits, so no
+defect or starvation in the exit machinery can leave a collapsing position
+unbounded; and `WEEKLY_MAX_LOSS` (enforced prospectively, restored from the
+week's CSV history at startup) stops five max-loss days from compounding
+past the weekly line. Both are honored in replay.
+
 **Critical-event alerting** (`alerts.py`) — configure `ALERT_WEBHOOK_URL`
 (Slack-compatible; Discord via `/slack` suffix) and/or SMTP email in `.env`.
 Every CRITICAL log line — staleness flatten, exit failure + gate lock,

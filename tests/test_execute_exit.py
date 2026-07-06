@@ -189,6 +189,31 @@ class TestExecuteExit:
         assert env.bot.position is not None
 
 
+class TestCatastrophicBreach:
+    """The independent backstop rule — dumbest possible check, no other
+    logic to get wrong."""
+
+    def _quote(self, bid, ask=1.0):
+        from signals import Quote
+        return Quote(symbol="X", bid=bid, ask=ask,
+                     timestamp=datetime.datetime.now(tz=config.ET))
+
+    def test_fires_at_threshold(self):
+        pos = _pos()                                    # entry 0.50 → line 0.10
+        assert main._catastrophic_breach(pos, self._quote(bid=0.10)) is True
+        assert main._catastrophic_breach(pos, self._quote(bid=0.05)) is True
+
+    def test_holds_above_threshold(self):
+        pos = _pos()
+        assert main._catastrophic_breach(pos, self._quote(bid=0.11)) is False
+
+    def test_no_bid_no_position_no_quote_are_safe(self):
+        pos = _pos()
+        assert main._catastrophic_breach(pos, self._quote(bid=0.0)) is False
+        assert main._catastrophic_breach(None, self._quote(bid=0.01)) is False
+        assert main._catastrophic_breach(pos, None) is False
+
+
 class TestEvaluateExitWideSpread:
     """The no-bid/wide-spread branch must never blind the stop or an
     executable TP."""

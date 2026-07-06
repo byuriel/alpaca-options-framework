@@ -315,6 +315,25 @@ class OrderManager:
         except Exception as e:
             logger.error("Cancel failed %s: %s", order_id, e)
 
+    def emergency_close_sync(self, symbol: str, qty: int) -> Optional[str]:
+        """Synchronous market close for halt paths that run BEFORE the event
+        loop exists (restart-storm brake). Submits and returns the order id
+        WITHOUT waiting for the fill — the process is halting; the nightly
+        reconciliation and the broker's own record are the confirmation."""
+        try:
+            order = self._client.close_position(
+                symbol, ClosePositionRequest(qty=str(qty)))
+            logger.warning(
+                "EMERGENCY CLOSE submitted: %s x%d id=%s — fill NOT confirmed "
+                "locally; verify at the broker / next reconciliation",
+                symbol, qty, order.id,
+            )
+            return str(order.id)
+        except Exception as e:
+            logger.critical("EMERGENCY CLOSE FAILED for %s x%d: %s — "
+                            "*** CLOSE MANUALLY AT THE BROKER ***", symbol, qty, e)
+            return None
+
     def cancel_all_options(self):
         """Cancel this bot's open option orders (synchronous — startup/shutdown
         paths only). Scoped to the configured underlying so a shared account's

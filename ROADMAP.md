@@ -30,8 +30,8 @@ deliberately small and verifiable.*
 
 ## Tier 1 — Trust and safety gates before live money
 
-*Status: items 1–3 SHIPPED (reconcile.py, feed_monitor.py, alerts.py);
-items 4–5 remain.*
+*Status: ALL FIVE SHIPPED — reconcile.py, feed_monitor.py, alerts.py,
+restart_guard.py, catastrophic backstop + weekly limit (risk.py/main.py).*
 
 **1. ✅ Nightly broker reconciliation** *(was the most important unbuilt
 item — promised in QUANT_REVIEW Phase 1)*
@@ -56,12 +56,12 @@ mismatch. Add a webhook/SMTP hook (env-configured, stdlib) fired on CRITICAL
 log events. A machine that flattens at 11:00 and stays silent until you
 check the terminal is not an unattended system. ~80 lines.
 
-**4. Restart-storm brake**
+**4. ✅ Restart-storm brake**
 The watchdog restarts without limit. File-based counter: >N restarts/hour →
 flatten via REST, write a halt marker, refuse to trade until manually
 cleared. Converts an infinite failure loop into one loud stop. ~60 lines.
 
-**5. Catastrophic-loss backstop + weekly limit**
+**5. ✅ Catastrophic-loss backstop + weekly limit**
 A gap through the −50% stop currently has no second line until the position
 hits zero. Add: hard exit at −80% of premium regardless of stop logic, and a
 weekly loss limit backed by the CSV history (daily limits alone let five

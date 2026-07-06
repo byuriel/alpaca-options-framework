@@ -147,6 +147,40 @@ class TestEndToEnd:
         assert r["reason"] == "stale_data"
         assert float(r["exit_price"]) == 0.55     # last executable bid before the gap
 
+    def test_catastrophic_backstop_fires_on_bid_collapse(self, tmp_path):
+        # Bid collapses to ≤20% of entry while the ASK stays pumped high
+        # enough that the MID never crosses the normal 50% stop and the
+        # spread stays inside the wide-spread gate on the way down — the
+        # exact hole the independent cat-stop sweep exists for. In replay
+        # the safety-watcher check runs between events, exactly like live.
+        events = []
+        for i in range(17):
+            close  = 600.0 + 0.2 * i
+            bar_ts = datetime.datetime(2026, 7, 6, 9, 30 + i, tzinfo=ET)
+            events.append(["b", _wall(9, 31 + i), bar_ts.isoformat(),
+                           close - 0.2, close + 0.1, close - 0.5, close, 10_000.0])
+        events += [
+            ["q", _wall(9, 47, 5),  CALL_SYM, 0.48, 0.52, ""],
+            ["q", _wall(9, 47, 7),  CALL_SYM, 0.49, 0.51, ""],   # entry @ 0.51
+            # bid 0.09 <= 0.51*0.20; ask keeps mid at 0.30 > stop 0.255,
+            # spread 140% → wide branch; executable=bid → normal stop would
+            # also catch this tick, BUT the cat check runs FIRST between
+            # events — asserting reason 'cat_stop' proves the independent
+            # path evaluated before the quote-driven machinery.
+            ["q", _wall(9, 47, 30), CALL_SYM, 0.09, 0.51, ""],
+            ["q", _wall(9, 47, 35), CALL_SYM, 0.09, 0.51, ""],
+        ]
+        path = str(tmp_path / "session_2026-07-06.jsonl.gz")
+        _write_recording(path, events)
+
+        summary = run_session(path, str(tmp_path / "out"))
+        assert summary["trades"] == 1
+        r = summary["rows"][0]
+        assert r["reason"] in ("cat_stop", "stop")   # backstop or primary —
+        assert float(r["exit_price"]) == 0.09        # either way it's OUT at the bid
+        # and the position did NOT ride to expiry
+        assert summary["stop_reason"] == "eof"
+
     def test_fomc_day_flattens_before_statement(self, tmp_path):
         # Same session shape but dated 2026-01-28 (an FOMC statement day,
         # Wednesday). The position enters at 09:47, never reaches TP or

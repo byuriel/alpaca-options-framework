@@ -28,6 +28,10 @@ class RiskManager:
         self._locked:        bool  = False   # True = no new entries this session
         self._lock_reason:   str   = ""
         self._cooldown_bars: int   = 0       # bars remaining before next entry allowed
+        self._week_pnl_prior: float = 0.0    # realized P&L of EARLIER sessions this
+                                             # week (Mon..yesterday) — set at startup
+                                             # from the CSV history; week total =
+                                             # this + _daily_pnl
 
     # ── Queries ───────────────────────────────────────────────────────────────
 
@@ -47,6 +51,20 @@ class RiskManager:
     def lock_reason(self) -> str:
         return self._lock_reason
 
+    @property
+    def week_pnl(self) -> float:
+        return self._week_pnl_prior + self._daily_pnl
+
+    def set_week_baseline(self, prior_pnl: float):
+        """Realized P&L from this week's earlier sessions (startup restore).
+        Locks immediately if the week is already through the limit."""
+        self._week_pnl_prior = prior_pnl
+        if self.week_pnl <= -config.WEEKLY_MAX_LOSS:
+            self.lock(f"weekly loss limit already hit (${self.week_pnl:.2f})")
+        elif prior_pnl != 0.0:
+            logger.info("Week-to-date baseline: $%.2f (limit -$%.2f)",
+                        prior_pnl, config.WEEKLY_MAX_LOSS)
+
     def can_trade(self) -> bool:
         if self._locked:
             logger.debug("Risk gate LOCKED (%s).", self._lock_reason or "daily loss limit")
@@ -63,6 +81,14 @@ class RiskManager:
             logger.debug(
                 "Projected daily loss gate: pnl=%.2f - risk=%.2f would breach -%.2f",
                 self._daily_pnl, config.MAX_RISK_PER_TRADE, config.MAX_DAILY_LOSS,
+            )
+            return False
+        # Same prospective logic at the week level — five bad days must not
+        # compound past the weekly line either.
+        if self.week_pnl - config.MAX_RISK_PER_TRADE <= -config.WEEKLY_MAX_LOSS:
+            logger.debug(
+                "Projected weekly loss gate: week=%.2f - risk=%.2f would breach -%.2f",
+                self.week_pnl, config.MAX_RISK_PER_TRADE, config.WEEKLY_MAX_LOSS,
             )
             return False
         return True
@@ -137,6 +163,8 @@ class RiskManager:
         )
         if self._daily_pnl <= -config.MAX_DAILY_LOSS:
             self.lock(f"daily loss limit hit (${self._daily_pnl:.2f})")
+        if self.week_pnl <= -config.WEEKLY_MAX_LOSS:
+            self.lock(f"WEEKLY loss limit hit (${self.week_pnl:.2f})")
 
     def reset_day(self):
         """Call at the start of each new session."""

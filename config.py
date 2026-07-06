@@ -123,6 +123,10 @@ MAX_DAILY_LOSS      = 300.00  # hard daily loss limit — bot stops new entries.
                               # Enforced *prospectively*: an entry is blocked if
                               # a full stop-out would breach this limit, not
                               # only after the loss is already booked.
+WEEKLY_MAX_LOSS     = 900.00  # hard weekly loss limit (Mon–Fri, realized) —
+                              # daily limits alone let five max-loss days
+                              # compound; this bounds the week. Enforced
+                              # prospectively like the daily limit.
 MAX_TRADES_PER_DAY  = 999     # effectively unlimited during paper/data collection
 TRADE_COOLDOWN_BARS = 3       # 1-min bars to wait after a close before re-entering
 
@@ -146,6 +150,22 @@ FEES_PER_CONTRACT_RT = 0.15
 # ── Exit levels ────────────────────────────────────────────────────────────────
 STOP_MULT          = 0.50   # hard stop: exit if price falls to 50% of entry
 TP_MULT            = 1.50   # take profit: exit at 50% gain (1.5× entry)
+CAT_STOP_MULT      = 0.20   # catastrophic backstop: if the executable BID is at
+                            # or below 20% of entry, flatten immediately. This
+                            # is deliberately REDUNDANT with the quote-driven
+                            # stop — it runs on an independent code path (the
+                            # 5s safety watcher), so a defect or starvation in
+                            # the quote-handler exit path can never leave a
+                            # collapsing position unbounded. Dumbest possible
+                            # rule, separately evaluated: that's the point.
+
+# ── Restart-storm brake ────────────────────────────────────────────────────────
+# The watchdog restarting once is recovery; restarting every few minutes is a
+# failure loop re-entering the same defect with a position possibly open.
+# At the threshold: flatten via REST, halt, alert, refuse to run until
+# `python restart_guard.py --clear`.
+RESTART_STORM_MAX        = 3     # watchdog restarts within the window → halt
+RESTART_STORM_WINDOW_SEC = 3600
 
 # ── Peak trailing stop ─────────────────────────────────────────────────────────
 # Arms once the option gains PEAK_TRAIL_ACTIVATE above entry.
