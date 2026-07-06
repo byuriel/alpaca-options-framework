@@ -21,6 +21,7 @@ from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.requests import OptionChainRequest
+from alpaca.data.enums import Adjustment
 
 import config
 from feeds import option_feed, stock_feed
@@ -43,6 +44,9 @@ def _atr_5day(stock_client: StockHistoricalDataClient) -> float:
         start=start,
         end=end,
         feed=stock_feed(),
+        adjustment=Adjustment.RAW,   # strike math needs UNadjusted prices —
+                                     # split/dividend adjustment shifts prices
+                                     # off the option strike grid
     )
     bars = stock_client.get_stock_bars(req)[config.UNDERLYING]
     # Exclude today's PARTIAL bar by date, not by blind slicing — the old

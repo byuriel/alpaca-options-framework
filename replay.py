@@ -172,6 +172,22 @@ async def _run(rec_path: str, out_dir: str) -> dict:
                 await main._execute_exit("event_flatten")
                 await _drain()
 
+            # Data-staleness kill switch — the live watcher flattens when the
+            # held symbol's quotes go silent. A recorded feed gap must produce
+            # the same flatten in replay, or replay diverges from live on
+            # exactly the sessions with data incidents. (Fires at the next
+            # event after the threshold rather than threshold+0s — the live
+            # watcher polls at 5s granularity, so both are approximate; the
+            # exit price is the last known bid either way.)
+            pos = main.bot_state.position
+            if pos is not None and not main.bot_state.exit_pending:
+                q = main.bot_state.get_quote(pos.symbol)
+                if (q is not None and q.recv_monotonic > 0
+                        and sim.monotonic() - q.recv_monotonic
+                        > config.STALE_QUOTE_FLATTEN_SEC):
+                    await main._execute_exit("stale_data")
+                    await _drain()
+
             # Session time stop — same trigger the live watcher fires on
             if sim.now_et().strftime("%H:%M") >= config.TIME_STOP:
                 if main.bot_state.entry_pending:
@@ -190,8 +206,8 @@ async def _run(rec_path: str, out_dir: str) -> dict:
                 bar = _SimBar(datetime.datetime.fromisoformat(ts_iso), o, h, l, c, v)
                 await main.on_spy_bar(bar)
                 n_bars += 1
-            else:  # "q"
-                _, _, sym, bid, ask, exch_iso = ev
+            else:  # "q" — 6-field (pre-size) and 8-field rows both replay
+                sym, bid, ask, exch_iso = ev[2], ev[3], ev[4], ev[5]
                 # Broker sees the tick BEFORE the decision code, exactly like
                 # live: the exchange had the quote before the bot acted on it.
                 broker.on_quote(sym, bid, ask)

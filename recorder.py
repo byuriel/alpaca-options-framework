@@ -21,11 +21,17 @@ Design constraints, in order:
 Line formats (JSONL, compact arrays — ~40% smaller than dicts at this volume):
   ["m", recv_wall, {metadata...}]
   ["b", recv_wall, bar_ts_iso, open, high, low, close, volume]
-  ["q", recv_wall, symbol, bid, ask, exch_ts_iso]
+  ["q", recv_wall, symbol, bid, ask, exch_ts_iso, bid_size, ask_size]
 
 recv_wall is the local receive time (epoch seconds) — the axis replay's
 simulated clock runs on. Exchange timestamps are preserved for analysis but
 ordering is by receipt, because that is what the live process experienced.
+
+Quote SIZES are captured even though the decision code doesn't use them yet:
+displayed size enables a size-aware fill model later (fill only up to the
+NBBO size), and size history cannot be retro-captured — every session
+recorded without it is permanently lost to that analysis. Readers tolerate
+the older 6-field quote rows (sizes default to 0).
 """
 
 import gzip
@@ -67,8 +73,10 @@ class MarketDataRecorder:
                    c: float, v: float):
         self._put(["b", time.time(), ts_iso, o, h, l, c, v])
 
-    def record_quote(self, symbol: str, bid: float, ask: float, exch_ts_iso: str):
-        self._put(["q", time.time(), symbol, bid, ask, exch_ts_iso])
+    def record_quote(self, symbol: str, bid: float, ask: float, exch_ts_iso: str,
+                     bid_size: int = 0, ask_size: int = 0):
+        self._put(["q", time.time(), symbol, bid, ask, exch_ts_iso,
+                   bid_size, ask_size])
 
     def _put(self, item):
         try:

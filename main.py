@@ -56,6 +56,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.option import OptionHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import Adjustment
 from alpaca.trading.enums import AssetClass
 
 import clock
@@ -244,7 +245,10 @@ async def on_option_quote(quote):
     ts  = quote.timestamp
 
     if _recorder is not None:
-        _recorder.record_quote(sym, bid, ask, ts.isoformat() if ts else "")
+        _recorder.record_quote(
+            sym, bid, ask, ts.isoformat() if ts else "",
+            int(quote.bid_size or 0), int(quote.ask_size or 0),
+        )
 
     # Update proxy delta tracker
     bot_state.update_option_quote(sym, bid, ask, ts)
@@ -1474,6 +1478,8 @@ async def main():
             start             = seed_start,
             end               = seed_end,
             feed              = stock_feed(),
+            adjustment        = Adjustment.RAW,   # unadjusted — consistent with
+                                                  # live stream + strike grid
         )
         raw = stock_client.get_stock_bars(seed_req)[config.UNDERLYING]
         raw = [b for b in raw

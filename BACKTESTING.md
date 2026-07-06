@@ -1,131 +1,236 @@
-# Backtesting — Current Capability and Proposal
+# Backtesting — Assessment, Design, and Fidelity Contract (v2)
+
+*v2 is the output of an adversarial review of the original proposal. The
+material changes are listed in §2 — including one fatal data-availability
+error in v1 that would have stopped implementation on day one. A design
+document that hides its own revision history is not one to trust.*
 
 ## 1. What exists today (honest assessment)
-
-The framework has **deterministic session replay**, not backtesting:
 
 | Capability | Status |
 |---|---|
 | Re-run a *recorded* session through the live code | ✅ `replay.py` — deterministic, conservative fills |
 | Parameter sweeps on recorded sessions | ✅ `--set KEY=VALUE` + paired stats (`trade_stats.py --compare`) |
+| Feed-gap / staleness behavior reproduced in replay | ✅ (added in this review — see §2) |
 | Test against *historical* periods before recording began | ❌ does not exist |
 | Test against specific past regimes (a vol spike, a grind, an FOMC cycle) | ❌ does not exist |
 
-Replay is forward-collecting: the library grows one session per live trading
-day. After three months you have ~60 sessions of gold-standard data — but
-you cannot ask "how would this have behaved in the March 2025 vol event?"
-because nothing was recorded then. That question is what backtesting answers,
-and it is the gap.
+Replay is forward-collecting: the library grows one gold-standard session per
+live trading day, at zero marginal cost. Backfill — reconstructing sessions
+the bot never ran — is the gap this document designs.
 
-## 2. Design philosophy: one engine, never two
+## 2. What the v1 review found (and what was done about it)
 
-The classic mistake is building a *second* simulator — a vectorized,
-bar-based backtester with its own fill model and its own reimplementation of
-the strategy. Two implementations of the same strategy **always** diverge
-(entry-gate subtleties, exit ordering, partial-fill handling, session-time
-edge cases), and every divergence silently invalidates the backtest. This
-repo already paid down that risk: `replay.py` feeds events through the
-identical live handlers.
+1. **FATAL — v1 assumed an Alpaca endpoint that does not exist.** The design
+   called for "historical option quotes (tick-level NBBO)" from Alpaca.
+   Alpaca's options data API provides historical **trades** and **bars**,
+   plus **latest** quotes/snapshots — there is **no historical option NBBO
+   quote time series** (confirmed against the SDK surface and Alpaca's open
+   feature-request tracker). → v2 makes the data source **pluggable** (§4);
+   option NBBO history comes from a dedicated provider.
+2. **Engine gap — replay ignored the staleness kill switch.** A recorded
+   session containing a real feed gap would have flattened live at
+   gap+45s, but replay rode through it — divergence on exactly the sessions
+   with data incidents. → **Fixed in code** (replay simulates the staleness
+   flatten; pinned by a test where a 4-minute quote gap exits at the last
+   executable bid, reason `stale_data`).
+3. **Irreversible data loss — NBBO sizes were being discarded.** The live
+   stream carries `bid_size`/`ask_size`; the recorder dropped them, and size
+   history cannot be retro-captured. → **Fixed in code** (recording format
+   now carries sizes; readers stay backward-compatible). This enables a
+   size-aware fill model later (§6.5).
+4. **Underspecified — subscription-state reconstruction.** v1 hand-waved
+   which quotes the bot "would have seen". v2 proves it is exactly
+   derivable (§5).
+5. **Unstated fidelity assumptions** — feed consistency, bar adjustment
+   mode, latency model, data revisions. v2 pins each one (§6).
+6. **Missing entirely — a research protocol.** An engine without sweep
+   governance is an overfitting machine (§9).
+7. **Volume estimate low by ~10×** — corrected (§10). **Tier C demoted**
+   from "fallback" to rejected-for-production (§8).
 
-**The proposal is therefore not a backtester. It is a data source.**
+## 3. Design principle: one engine, never two
+
+The classic failure is a *second* simulator — vectorized, bar-based, with
+its own fill model and a reimplementation of the strategy. Two
+implementations always diverge, and every divergence silently invalidates
+the backtest. This repo already paid down that risk: `replay.py` feeds
+events through the identical live handlers.
+
+**Backfill is therefore not a backtester. It is a data source.**
 
 ```
-                          ┌──────────────────────────────┐
-   live capture ────────► │                              │
-   (recorder.py, gold)    │   the ONE replay engine      │ ──► trades CSV
-                          │   (replay.py — live code,    │ ──► trade_stats
-   historical backfill ─► │    SimClock, SimBroker)      │      (CIs, sweeps)
-   (backfill.py, NEW)     │                              │
-                          └──────────────────────────────┘
+   live capture ──────────┐
+   (recorder.py — gold,   │      ┌──────────────────────────────┐
+    zero marginal cost)   ├────► │   the ONE replay engine      │ ─► trades CSV
+                          │      │   (replay.py — live code,    │ ─► trade_stats
+   backfill.py (NEW)      │      │    SimClock, SimBroker)      │    (CIs, paired
+   ┌────────────────────┐ │      └──────────────────────────────┘     sweeps)
+   │ provider adapters: ├─┘
+   │  stock bars: Alpaca (SIP, RAW adjustment)
+   │  option NBBO: Polygon / ThetaData / Databento  ← NOT Alpaca (see §4)
+   └────────────────────┘
 ```
 
-`backfill.py` synthesizes recording files — the *same* `.jsonl.gz` format
-`recorder.py` writes — from Alpaca's **historical** REST data. The replay
-engine, the fill model, the statistics layer, and the sweep workflow all
-work unchanged. Zero new simulation code; every improvement to replay
-automatically improves backtesting.
+`backfill.py` synthesizes recording files — the same `.jsonl.gz` format
+`recorder.py` writes — so the engine, fill model, statistics, and sweep
+workflow work unchanged, and every future replay improvement automatically
+improves backtesting.
 
-## 3. How backfill works
+## 4. Data reality (verified, not assumed)
 
-Per historical session date:
+| Need | Source | Notes |
+|---|---|---|
+| SPY 1-min bars, historical | **Alpaca** (`feed=sip`, `adjustment=RAW`) | SIP history available regardless of live-stream tier. RAW is mandatory — adjusted prices shift off the option strike grid. |
+| Option chain per historical date | **Alpaca** | for existence validation, as live |
+| Option NBBO tick history | **Polygon.io** (`/v3/quotes/{contract}`), **ThetaData**, or **Databento** (OPRA) | Alpaca does not offer this. Adapter interface keeps the choice open; Polygon is the pragmatic default (per-contract REST, years of OPRA history). |
+| Option trade/bar history | Alpaca has it | insufficient for this strategy — see Tier C rejection (§8) |
 
-1. **Bars**: fetch SPY 1-min bars (historical REST, `feed=sip` — the
-   consolidated tape is available historically even on accounts that stream
-   IEX live).
-2. **Strike determination is deterministic**: `compute_dynamic_strikes()` is
-   a pure function of (bar closes, 5-day ATR baseline). Walk the day's bars
-   *offline* to derive exactly which option symbols the bot would have
-   subscribed — the target window plus re-subscription shifts. Typically
-   ~42–80 symbols/day.
-3. **Option quotes**: fetch historical option quotes (`OptionQuotesRequest`,
-   tick-level NBBO) for **only those symbols** — this is what makes the
-   fetch tractable (dozens of contracts, not the whole chain).
-4. **Interleave** bars and quotes into receive order, synthesizing
-   `recv_wall = exchange_ts + LATENCY_MS` (configurable, default ~50ms), and
-   write the recording with metadata marked `"source": "backfill"` — every
-   downstream report can (and must) disclose reconstructed provenance.
-5. Compute the session's ATR baseline and momentum preseed from historical
-   data the same way `main()` does at startup; store in metadata.
+The adapter interface is small — `stock_bars(date)`,
+`option_quotes(symbol, date)`, `chain(date)` — and the recording file is the
+boundary: the engine never learns which provider produced the ticks.
 
-## 4. Fidelity tiers — label everything
+## 5. Subscription reconstruction is exactly derivable (proof sketch)
 
-| Tier | Source | Fidelity | Use for |
-|---|---|---|---|
-| **A** | Live capture (`recorder.py`) | Gold — true receive order, true gaps, the tape the bot actually saw | Final validation, track record |
-| **B** | Backfill from historical tick quotes | Silver — real NBBO ticks, synthetic receive times, no feed outages | Parameter studies, regime testing |
-| **C** | Backfill from 1-min option bars (if tick history unavailable) | Bronze — intra-minute path unknown; peak-trail and fast stops unreliable | Rough viability screens ONLY, pessimistic settlement rules required |
+Which quotes did the live bot *see*? Only subscribed symbols'. The live
+subscription set is **add-only within a session** (`add_option_symbols`
+never unsubscribes), and every addition is triggered by bar-close prices
+alone: the 9:30 open bar fixes the initial window; the re-subscribe watcher
+adds a new window whenever SPY's bar-close price moves ±$3 from the last
+anchor; the held-symbol pin is a no-op for the quote stream because a held
+symbol was necessarily already subscribed when entered. Therefore the
+per-symbol subscription start times are a pure function of (bars, ATR
+baseline) — the offline walk computes them exactly, and backfill emits each
+symbol's quotes only from its subscription time onward. No superset
+approximation, no lookahead: strikes derive from bars available at the time,
+and chain validation uses that date's chain.
 
-Tier B is the target. Tier C should be implemented only as a fallback and
-its reports stamped accordingly.
+## 6. Fidelity contract (each item is a divergence source if unpinned)
 
-**The acceptance test that makes Tier B trustworthy** (this is the
-non-negotiable part): take N sessions that were BOTH live-captured and
-backfilled, replay each pair, and diff the outcomes (trades, fills,
-P&L). The measured divergence — the *reconstruction error* — is reported
-with every backfill study. If entry fills differ by more than ~1 tick or
-trade sets diverge on >5% of sessions, the latency model gets tuned before
-any conclusions are drawn. Backtests earn trust by being checked against
+1. **Feed consistency.** Backfill bars are SIP. If the live sessions used
+   for verification ran on IEX, verify-mode diffs conflate feed deltas with
+   reconstruction error. Rule: verification compares like-for-like feeds —
+   which is one more reason to run live on SIP/OPRA (now supported) before
+   building the verification library.
+2. **Adjustment mode pinned to RAW** on every historical bar request.
+3. **Latency is calibrated, not assumed.** Live recordings carry both
+   `recv_wall` and exchange timestamps per event — the Tier A library yields
+   the empirical latency distribution for quotes *and* bar-arrival delays.
+   Backfill synthesizes `recv_wall = exch_ts + median_latency` (seeded
+   sampling from the measured distribution as an option). No magic 50ms.
+4. **Historical data is revised; recordings are immutable.** A re-fetch
+   months later can differ. Every backfilled recording stamps
+   `source: backfill`, provider, fetch timestamp, and a content hash in its
+   metadata; studies cite recording hashes. Reproducible research, not
+   "whatever the API returned that day".
+5. **Sizes.** The recording format now carries NBBO sizes (live capture
+   banking them from today). Backfill providers supply historical sizes.
+   This enables an optional size-capped fill model in SimBroker later; at
+   this strategy's 1–12 contract clips it rarely binds, but the data must
+   exist before the model can.
+6. **Provenance segregation downstream.** `replay.py` prints the recording's
+   source; `trade_stats.py` must refuse to silently pool Tier A and Tier B
+   samples (separate sections, or an explicit `--allow-mixed`).
+
+## 7. The verification harness (what makes any of this trustworthy)
+
+For every session that was BOTH live-captured and backfilled, replay each
+and diff, in decomposition order:
+
+1. **Subscription-set match** — if symbol sets differ, everything downstream
+   is tape divergence, not model divergence; report and stop there.
+2. **Trade-set overlap** (Jaccard on entry decisions ± a tolerance window).
+3. **Per-matched-fill price differences** (in ticks, signed — detects
+   systematic optimism, not just noise).
+4. **Session P&L difference distribution.**
+
+The aggregate is the **reconstruction error**, and it is reported alongside
+every backfill study, permanently. Acceptance gate to trust Tier B at all:
+trade sets match on ≥95% of verification sessions and matched fills agree
+within one tick at the median. Fail → tune the latency model, re-verify —
+never proceed on vibes. Backtests earn trust by being checked against
 ground truth, not by being plausible.
 
-## 5. Data requirements and constraints
+## 8. Fidelity tiers
 
-- **History depth**: Alpaca's historical options data begins **Feb 2024** —
-  the backtest horizon is bounded there. That still covers multiple distinct
-  regimes (2024 grind, Aug-2024 vol event, 2025 cycles).
-- **Subscription**: historical option *quotes* at tick level require the
-  paid Alpaca options data subscription (the same OPRA entitlement now
-  supported live via `ALPACA_OPTION_FEED=opra`). Without it, only Tier C is
-  possible.
-- **Volume**: ~50 symbols × one session of NBBO ticks ≈ a few million rows;
-  fetched once per session, cached as the recording file forever. Rate
-  limits make first-time backfill of a year of sessions an overnight batch
-  job, not an interactive one — design it resumable (skip already-built
-  recordings).
-- **Survivorship/lookahead**: none — strikes are derived from bars only
-  (information available at the time), and the chain existence check uses
-  the historical chain for that date.
+| Tier | Source | Status |
+|---|---|---|
+| **A** | Live capture | Gold. The default and the ground truth. |
+| **B** | Backfill from provider NBBO ticks | Silver. Valid only under the §6 contract with §7 verification passing. |
+| **C** | Backfill from option *trade* bars (Alpaca-only path) | **Rejected for production.** The strategy's economics live inside the minute (quote-driven stops, peak trail, resting-limit entries) and option trade-bars have empty minutes on quiet strikes; no settlement rule recovers information that isn't there. Permissible only as a coarse viability screen, output stamped as such. |
 
-## 6. Implementation plan
+## 9. Research protocol (the part that prevents self-deception)
+
+The engine makes experiments cheap; cheap experiments are how strategies
+get overfit. Non-negotiable workflow:
+
+1. **Split before looking.** Designate an out-of-sample session set (e.g.
+   most recent 25% plus one full vol regime) that sweeps never touch. It is
+   evaluated ONCE, when a parameter change is already accepted in-sample.
+2. **Every sweep declares its family size.** `trade_stats.py --compare
+   --variants-tested K` exists precisely for this; the Bonferroni-adjusted
+   p is the only quotable number for the best of a sweep.
+3. **Experiment ledger.** A plain CSV: date, hypothesis, sessions used,
+   variants tested, adjusted p, decision. The ledger count is the true K
+   accumulating across the project's life — the basis for deflated
+   performance estimates (deflated Sharpe is a planned `trade_stats`
+   addition once daily samples justify it).
+4. **Regime stratification.** Backfill exists to buy regime coverage —
+   report results split by regime (realized-vol terciles, trend/chop days,
+   event days), never only pooled. An edge that lives in one regime is a
+   regime bet, and should be known as one.
+5. **Recording hashes in every study** (§6.4) so any result can be re-run
+   bit-for-bit.
+
+## 10. Scale and cost honesty
+
+- **Volume:** 40–80 near-money SPY 0DTE contracts can print *tens of
+  millions* of NBBO ticks on a volatile day (not "a few million" as v1
+  claimed). Replay at ~30–50µs/event → 10–30 min per session,
+  single-threaded.
+- **Parallelism:** sessions are independent — run per-session processes;
+  a year backfills overnight on a modest machine.
+- **Conflation knob** (e.g. keep ≤N quotes/sec/symbol) exists as an
+  explicit fidelity trade-off for coarse screens — never the default, and
+  stamped into the recording metadata when used.
+- **History depth:** bounded by the chosen NBBO provider (Polygon/Databento
+  reach back years; SPY daily-expiry structure limits how far back "0DTE
+  every day" itself existed — full daily expirations date from 2022–2023).
+- **Provider cost:** an options NBBO history subscription (order of
+  $100–200/month retail tiers, or metered on Databento). Weigh against the
+  free alternative: the live recorder banks a gold session every day.
+
+## 11. Implementation plan
 
 | Step | Deliverable | Size |
 |---|---|---|
-| 1 | `backfill.py`: bars → offline strike walk → quote fetch → interleave → recording file; resumable batch mode (`--from 2025-01-01 --to 2025-06-30`) | ~300 lines |
-| 2 | Provenance: `"source": "backfill"` in metadata; `replay.py` prints it; `trade_stats.py` reports refuse to silently mix Tier A and Tier B samples (separate sections or explicit `--allow-mixed`) | ~50 lines |
-| 3 | Reconstruction-error harness: `backfill.py --verify` on dates with live captures; report per-session diff table | ~100 lines |
-| 4 | Docs + tests (offline strike-walk determinism, interleave ordering, verify-mode diff on synthetic fixtures) | — |
+| 1 | `HistoricalSource` adapter protocol + Alpaca stock-bars adapter + Polygon option-NBBO adapter | ~200 lines |
+| 2 | Offline subscription walk (§5) — pure function, unit-tested against the live routing logic | ~100 lines |
+| 3 | Interleave + latency synthesis (calibrated from Tier A library) + recording writer with provenance/hash metadata; resumable batch CLI (`--from --to`) | ~150 lines |
+| 4 | Verification harness (§7) with per-session diff report | ~150 lines |
+| 5 | Provenance guards in `replay.py` / `trade_stats.py` (no silent A/B pooling) | ~50 lines |
 
-No changes to replay, stats, or the live bot are required — that is the
-point of the architecture.
+Engine changes required: **none** (the two found in review are already
+merged). That remains the point of the architecture.
 
-## 7. What was deliberately rejected
+## 12. Strategic sequencing (do the free thing first)
 
-- **A vectorized bar-based backtester** (pandas/vectorbt style): fast, and
-  wrong for this strategy — quote-driven exits, resting-limit entries, and
-  the peak trail all live *inside* the minute. Rejected.
-- **Third-party frameworks** (backtrader, zipline, etc.): require
-  reimplementing the strategy in their dialect — reintroducing the
-  two-implementations divergence this repo's whole design avoids. Rejected.
-- **Synthetic option pricing** (Black-Scholes quotes from SPY bars): 0DTE
-  microstructure (spread dynamics, pin behavior, event vol) is exactly what
-  BS misses, and it's exactly what this strategy trades. Real recorded/
-  historical NBBO or nothing. Rejected.
+1. **Now:** keep the recorder running every session (it is on by default) —
+   the gold library grows daily at zero cost, and it doubles as the
+   latency-calibration and verification corpus backfill will need.
+2. **Trigger for building backfill:** a concrete regime question the live
+   library cannot answer (e.g. "does the ATR gate survive a vol spike?") —
+   that justifies the provider subscription and steps 1–4.
+3. **Never:** skip §7 verification because the backfill "looks right".
+
+## 13. Rejected alternatives (unchanged from v1, plus one)
+
+- **Vectorized bar-based backtester** — the strategy's economics are
+  intra-minute; rejected.
+- **Third-party frameworks** (backtrader/zipline/…) — require a second
+  strategy implementation; rejected.
+- **Synthetic option quotes from Black-Scholes on SPY bars** — 0DTE
+  microstructure is exactly what BS misses and exactly what this strategy
+  trades; rejected.
+- **Alpaca-only backfill** *(new in v2)* — no historical option NBBO
+  exists there; the trades/bars path is Tier C, rejected for production.
