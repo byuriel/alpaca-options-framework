@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -r requirements-dev.txt
+      - name: Compile all modules
+        run: python -m py_compile *.py
+      - name: Run test suite
+        run: python -m pytest tests/ -q
+        env:
+          ALPACA_API_KEY: test
+          ALPACA_API_SECRET: test

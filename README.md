@@ -73,20 +73,29 @@ Three concurrent WebSocket streams. Entry logic runs in the quote handler. Exit 
 ```
 alpaca-options-framework/
 │
-├── config.py       All parameters in one place — API keys, thresholds, timing
-├── main.py         asyncio orchestrator, exit monitor, terminal UI, keyboard cmds
+├── config.py       All parameters in one place — env credentials, thresholds,
+│                     timing, fees, kill-switch thresholds
+├── main.py         asyncio orchestrator, centralized exit executor, exit monitor,
+│                     staleness kill switch, terminal UI, keyboard cmds
 │
 ├── feeds.py        WebSocket stream manager (subscribe / add_option_symbols)
-├── orders.py       Alpaca TradingClient wrapper (buy_limit / close_position)
-├── state.py        Session state: position, quote cache, peak_mid tracking, CSV log
-├── risk.py         Position sizing, daily loss gate, cooldown, P&L restore
-├── strikes.py      ATR calculation, dynamic strike selection, OCC symbol builder
+├── orders.py       Alpaca TradingClient wrapper — event-driven fills, partial-fill
+│                     handling, all REST off the event loop
+├── state.py        Session state: position, quote cache, CSV log (net of fees,
+│                     order IDs, slippage), position persistence for restarts
+├── risk.py         Position sizing (hard caps), prospective daily loss gate,
+│                     cooldown, session lock, P&L restore
+├── strikes.py      ATR calculation, dynamic strike selection, chain validation
+├── occ.py          OCC symbol build/parse (stdlib-pure, unit-tested)
+├── market_calendar.py  NYSE holidays + early closes — session-derived time stop
 ├── momentum.py     EMA5/EMA20, VWAP, ROC5, atr5, consecutive bar engine
+│                     (session stats strictly RTH — premarket feeds EMAs only)
 │
 ├── orb_filter.py   Clock-hour ORB directional regime filter (shadow mode)
 ├── kpi_dashboard.py  Self-contained HTML KPI report generator (see below)
+├── tests/          Unit + async integration tests (pytest)
 │
-└── signals.py      Entry and exit signal logic — the LIVE strategy, as traded
+└── signals.py      Entry signal logic — the LIVE strategy, as traded
                       daily on paper: momentum match, ATR velocity gate, strike
                       proximity zones, ITM guard, proxy delta.
 ```
@@ -100,20 +109,27 @@ alpaca-options-framework/
 ### 1. Install dependencies
 
 ```bash
-pip install "alpaca-py>=0.43.0"
+pip install -r requirements.txt          # runtime
+pip install -r requirements-dev.txt     # + pytest, to run the test suite
 ```
 
-Requires Python 3.9+. All other dependencies are stdlib.
+Requires Python 3.9+. All other runtime dependencies are stdlib. Run the
+tests any time with `python -m pytest tests/`.
 
 ### 2. Add your Alpaca credentials
 
-Open `config.py` and replace the placeholders:
+Credentials come from the environment — never from a tracked file:
 
-```python
-ALPACA_API_KEY    = "YOUR_ALPACA_API_KEY_HERE"
-ALPACA_API_SECRET = "YOUR_ALPACA_API_SECRET_HERE"
-PAPER             = True   # always start on paper trading
+```bash
+cp .env.example .env
+# edit .env:
+#   ALPACA_API_KEY=...
+#   ALPACA_API_SECRET=...
+#   ALPACA_PAPER=true      # live requires an explicit "false"
 ```
+
+`.env` is gitignored; plain environment variables work too and always win
+over the file. The bot refuses to start with missing/placeholder keys.
 
 Get your keys: [alpaca.markets](https://alpaca.markets) → Paper Trading → API Keys → Generate
 
@@ -164,9 +180,40 @@ At 3:25 PM ET (time stop watcher):
   → close_position() → "time_stop"
 ```
 
-**Race-condition safety:** `exit_pending` is set to `True` before the first `await` in `_evaluate_exit()`. Because asyncio is cooperative (no preemption between synchronous lines), no duplicate exit orders can be submitted even when multiple quote ticks arrive simultaneously.
+**Race-condition safety:** `exit_pending` is set to `True` before the first `await` in the exit path. Because asyncio is cooperative (no preemption between synchronous lines), no duplicate exit orders can be submitted even when multiple quote ticks arrive simultaneously.
 
-All exits are logged to `logs/trades_YYYY-MM-DD.csv` with entry price, exit price, quantity, reason, P&L, and timestamps.
+**Execution integrity (the invariants everything else depends on):**
+
+- **Confirmed fills only.** A trade row is written to the CSV only on a
+  broker-confirmed fill. A failed close keeps the position tracked and retries
+  with backoff — it never books a guessed price and never erases local
+  tracking while the broker still holds the position. After repeated failures
+  it locks the entry gate and logs CRITICAL instead of pretending.
+- **Partial fills are first-class.** A partially filled entry adopts the
+  filled portion (real quantity, real average price); a partial close books
+  the closed leg and immediately retries the remainder.
+- **The ghost sweeper can't eat a real position.** `entry_pending` covers the
+  entire window from order submission until local tracking exists, and the
+  sweeper stands down while it's set (re-checked after every await).
+- **Wide spreads don't blind the stop.** When the spread blows out, TP/trail
+  skip the unreliable mid — but the hard stop still evaluates on the
+  executable bid. Dislocations are exactly when the stop must fire.
+- **Data staleness kill switch.** No fresh quote for the held symbol in 45s →
+  flatten (`close_position()` needs no quotes). No SPY bar in 180s → lock new
+  entries. A silently dead WebSocket can no longer leave a position flying blind.
+- **Session-aware clock.** NYSE holidays and 13:00 early closes shift the
+  time stop and entry cutoff automatically — a 0DTE position is never held
+  into expiry because the market closed at 1pm. The calendar tables in
+  `market_calendar.py` cover **2025–2027**; past that horizon the bot
+  *refuses to start* (loud `SystemExit`) rather than guess at holidays, and
+  it warns at startup for 30 days before the edge. Extending the tables is a
+  two-minute edit — do it before January of the first uncovered year.
+
+All exits are logged to `logs/trades_YYYY-MM-DD.csv` with entry/exit price,
+quantity, reason, **P&L net of regulatory fees**, order IDs (reconcilable
+against broker statements), decision-time bid/ask, and per-side slippage.
+Position metadata is persisted to `logs/position_state.json`, so a restart
+recovers the real entry time/price/SPY level — not an approximation.
 
 ---
 

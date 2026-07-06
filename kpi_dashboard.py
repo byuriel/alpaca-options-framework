@@ -21,8 +21,11 @@ import json
 import os
 import re
 
+import config
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR  = os.path.join(BASE_DIR, "logs")
+ET       = config.ET
 
 GHOST_RE  = re.compile(
     r"^(\d{4}-\d{2}-\d{2}) [\d:,]+ \[WARNING\] main: GHOST CLOSED: (\S+) "
@@ -61,7 +64,8 @@ def load_trades(days: int):
                 except (ValueError, KeyError):
                     continue
                 rows.append(r)
-    cutoff = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    # ET, not machine-local: a UTC host after 20:00 ET would shift the window
+    cutoff = (config.today_et() - datetime.timedelta(days=days)).isoformat()
     rows   = [r for r in rows if r["date"] >= cutoff]
     return ([r for r in rows if not is_artifact(r)],
             [r for r in rows if is_artifact(r)])
@@ -139,7 +143,9 @@ def build(days: int, out_path: str):
 
     # ── Core KPIs ────────────────────────────────────────────────────────────
     pnl_total   = sum(r["realized_pnl"] for r in trades)
-    wins        = [r for r in trades if r["realized_pnl"] >= 0]
+    # A scratch (P&L == 0) is not a win — counting it as one inflates the
+    # headline stat a buyer/allocator will check first.
+    wins        = [r for r in trades if r["realized_pnl"] > 0]
     losses      = [r for r in trades if r["realized_pnl"] < 0]
     gross_win   = sum(r["realized_pnl"] for r in wins)
     gross_loss  = -sum(r["realized_pnl"] for r in losses)
@@ -159,7 +165,7 @@ def build(days: int, out_path: str):
         d = daily[r["date"]]
         d["pnl"] += r["realized_pnl"]
         d["n"]   += 1
-        d["wins"] += r["realized_pnl"] >= 0
+        d["wins"] += r["realized_pnl"] > 0
     for g in ghosts:
         if g["date"] in daily:
             daily[g["date"]]["ghost"] += g["pnl"]
@@ -179,12 +185,14 @@ def build(days: int, out_path: str):
             e = g.setdefault(k, {"n": 0, "pnl": 0.0, "wins": 0})
             e["n"] += 1
             e["pnl"] += r["realized_pnl"]
-            e["wins"] += r["realized_pnl"] >= 0
+            e["wins"] += r["realized_pnl"] > 0
         return g
 
     by_reason = group(lambda r: r["reason"])
     by_side   = group(lambda r: r["side"])
-    by_hour   = group(lambda r: r["entry_dt"].astimezone().hour)
+    # Explicit ET — a bare astimezone() buckets by the machine's local zone,
+    # which shifts every hour label when the report is built on a UTC host.
+    by_hour   = group(lambda r: r["entry_dt"].astimezone(ET).hour)
 
     # ── ORB shadow filter panel ──────────────────────────────────────────────
     shadow_days   = sorted({s["date"] for s in shadow})
@@ -197,7 +205,7 @@ def build(days: int, out_path: str):
     blocked_pnl   = sum(b["realized_pnl"] for b in blocked)
     shadow_actual = sum(t["realized_pnl"] for t in shadow_trades)
     shadow_filtered = shadow_actual - blocked_pnl
-    blocked_wins  = [b for b in blocked if b["realized_pnl"] >= 0]
+    blocked_wins  = [b for b in blocked if b["realized_pnl"] > 0]
     blocked_loss  = [b for b in blocked if b["realized_pnl"] < 0]
 
     # ── Chart data ───────────────────────────────────────────────────────────

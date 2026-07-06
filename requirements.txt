@@ -1,5 +1,9 @@
-# Runtime
-alpaca-py>=0.43.0
+# Runtime — bounded pin: feeds.py relies on stream internals that can move
+# between minor releases, so an unbounded ">=" can break the bot at 09:31.
+# Tested against alpaca-py 0.43.5. Bump the upper bound only after re-testing.
+alpaca-py>=0.43.0,<0.44
 
-# Python 3.9+ required (uses zoneinfo, stdlib from 3.9+)
-# All other dependencies (asyncio, csv, datetime, logging, etc.) are stdlib.
+# Python 3.9+ required (zoneinfo, asyncio.to_thread — stdlib from 3.9+).
+# All other runtime dependencies (asyncio, csv, datetime, logging, etc.) are stdlib.
+
+# Dev/test: pip install -r requirements-dev.txt

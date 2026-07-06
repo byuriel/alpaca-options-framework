@@ -12,12 +12,13 @@ Exposes:
 """
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Deque, Optional
 import datetime
 import logging
 
 import config
+import market_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,26 @@ class MomentumEngine:
         )
 
     def on_bar(self, bar: Bar) -> MomentumState:
-        bar_date = bar.t.astimezone(config.ET).date()
+        bar_et   = bar.t.astimezone(config.ET)
+        bar_date = bar_et.date()
+
+        # Premarket / after-hours bars: EMAs are continuous indicators and
+        # keep updating, but VWAP, streaks, ROC and atr5 are RTH-session
+        # statistics — thin extended-hours prints must not contaminate them.
+        # (The session therefore effectively resets at 09:30, as documented,
+        # not at the first premarket bar of the new date.)
+        if not (market_calendar.ET_OPEN <= bar_et.time() < market_calendar.ET_REGULAR_CLOSE):
+            self._ema5  = self._ema(self._ema5,  bar.close, 5)
+            self._ema20 = self._ema(self._ema20, bar.close, 20)
+            self.state = replace(
+                self.state,
+                direction  = "neutral",
+                ema5       = self._ema5,
+                ema20      = self._ema20,
+                last_close = bar.close,
+            )
+            return self.state
+
         if bar_date != self._session_date:
             self._reset_session(bar_date)
 

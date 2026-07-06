@@ -15,6 +15,7 @@ preventing it. Set LIVE_MODE = True in config to activate real blocking.
 
 import datetime
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ class ORBFilter:
         self._bias = new_bias
 
     @property
-    def bias(self) -> str | None:
+    def bias(self) -> Optional[str]:   # PEP 604 unions in evaluated positions break 3.9
         """Current directional bias: 'call', 'put', or None (no restriction)."""
         return self._bias
 

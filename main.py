@@ -2,7 +2,9 @@
 Entry point — orchestrates the full bot lifecycle.
 
 Flow:
-  1. Startup: fetch ATR baseline, pre-seed EMAs, recover open positions
+  1. Startup: validate credentials + trading calendar, fetch ATR baseline,
+     prime the option-chain cache, pre-seed EMAs, recover open positions
+     (full metadata from logs/position_state.json, existence from REST)
   2. On each 1-min SPY bar:
        a. Update momentum engine (EMA5/20, VWAP, ROC5, atr5, direction)
        b. Tick risk cooldown
@@ -11,16 +13,33 @@ Flow:
   3. On each option quote tick (quote-driven exits):
        - Update quote cache and proxy delta tracker
        - IF holding this symbol: asyncio.create_task(_evaluate_exit())
-         → sub-50ms response, fires on every tick
-       - ELSE: evaluate entry signal if no open position
+       - ELSE: asyncio.create_task(_evaluate_entry()) — entries are ALSO
+         task-spawned so the buy path (submit + fill wait) never blocks the
+         quote handler chain; a blocked handler would leave the just-opened
+         position's exits blind during its riskiest first seconds
   4. _exit_monitor: 30-second safety net in case quotes stop arriving
-  5. _time_stop_watcher: force-close all positions at 15:25 ET
+  5. _staleness_watcher: kill switch — flattens if quotes for the held symbol
+     go silent, locks new entries if the bar stream dies
+  6. _time_stop_watcher: force-close all positions at the session-derived
+     time stop (re-anchored on early-close days)
 
 Exit priority (evaluated in _evaluate_exit on every quote):
   1. TP       — mid >= entry × TP_MULT (1.50×)
   2. Stop     — mid <= entry × STOP_MULT (0.50×)
   3. Trail    — peak_mid >= entry × 1.20 AND mid <= peak_mid × 0.88
-  4. TimeStop — clock >= 15:25 ET (separate watcher)
+  4. TimeStop — session close − 35 min (separate watcher)
+
+Execution integrity invariants (do not weaken these):
+  - A trade is booked into the CSV ONLY on a broker-confirmed fill. A failed
+    close keeps the position tracked and retries — it never books a guessed
+    price and never erases local tracking while the broker still holds the
+    position (that combination double-counts P&L via the ghost sweeper).
+  - entry_pending is True from the entry decision until the position is fully
+    tracked locally; the ghost sweeper stands down while it is set, so a fill
+    that exists on Alpaca a beat before local tracking cannot be reaped.
+  - All broker REST calls in-session run off the event loop
+    (asyncio.to_thread) so a slow HTTP round trip cannot stall the streams
+    or trip the watchdog.
 """
 
 import asyncio
@@ -28,7 +47,6 @@ import csv
 import datetime
 import logging
 import os
-import re
 import select
 import signal
 import sys
@@ -42,17 +60,19 @@ from alpaca.data.enums import DataFeed
 from alpaca.trading.enums import AssetClass
 
 import config
+import market_calendar
+import strikes
 from feeds import FeedManager
 from momentum import MomentumEngine, Bar
+from occ import parse_occ_expiry, parse_occ_symbol
 from orders import OrderManager
 from risk import RiskManager
 from orb_filter import ORBFilter
 from signals import check_entry
 from state import BotState, Position
-from strikes import startup_atr, compute_dynamic_strikes
 
 os.makedirs(config.LOG_DIR, exist_ok=True)
-_today_str = datetime.date.today().strftime("%Y-%m-%d")
+_today_str = config.today_et().isoformat()
 logging.basicConfig(
     level    = logging.INFO,
     format   = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -72,16 +92,19 @@ risk_manager    = RiskManager()
 order_manager   = OrderManager()
 orb_filter      = ORBFilter()
 
-_entry_lock: asyncio.Lock = asyncio.Lock()
+_entry_lock:       asyncio.Lock = asyncio.Lock()
+_ghost_sweep_lock: asyncio.Lock = asyncio.Lock()
+_foreign_positions_seen: set = set()   # out-of-scope positions logged once
 
 # ── Watchdog heartbeat ────────────────────────────────────────────────────────
-# Updated by _status_loop every iteration. Watchdog thread checks every 30s;
+# Updated by _status_loop every iteration. Watchdog thread checks every 10s;
 # if stale for > WATCHDOG_TIMEOUT seconds during market hours, auto-restarts.
 import time as _time
 _last_heartbeat:     float = 0.0
 _WATCHDOG_TIMEOUT    = 20    # seconds — restart if event loop silent this long
 _WATCHDOG_START      = "09:00"   # ET — only watch after this time
-_WATCHDOG_END        = "15:35"   # ET — stop watching after this time
+_WATCHDOG_END        = "15:35"   # ET — stop watching after this time (re-anchored
+                                 # to the session close on early-close days)
 
 # Routing table: {occ_symbol: (side, strike)} — updated every bar
 _current_subscriptions: dict[str, tuple] = {}
@@ -94,8 +117,11 @@ _open_bar_strikes:   dict           = {}     # strike data from the opening bar
 _RESUB_THRESHOLD     = 3.0   # SPY points of movement before re-subscribing option window
 _last_sub_spy_price: float = 0.0
 
+# Exit executor
+_CLOSE_MAX_ATTEMPTS  = 3     # close retries before locking the gate and alerting
 
-def _build_routing_table(strikes: dict) -> dict:
+
+def _build_routing_table(strikes_dict: dict) -> dict:
     """
     Build {occ_symbol: (side, actual_strike)} routing table.
     Each symbol gets its OWN parsed strike — NOT the shared target strike.
@@ -103,12 +129,12 @@ def _build_routing_table(strikes: dict) -> dict:
     strike of each symbol, not a shared target that may be several strikes away.
     """
     meta = {}
-    for sym in strikes["call_symbols"]:
-        _, actual_strike = _parse_occ_symbol(sym)
+    for sym in strikes_dict["call_symbols"]:
+        _, actual_strike = parse_occ_symbol(sym)
         if actual_strike is not None:
             meta[sym] = ("call", actual_strike)
-    for sym in strikes["put_symbols"]:
-        _, actual_strike = _parse_occ_symbol(sym)
+    for sym in strikes_dict["put_symbols"]:
+        _, actual_strike = parse_occ_symbol(sym)
         if actual_strike is not None:
             meta[sym] = ("put", actual_strike)
     return meta
@@ -128,6 +154,7 @@ async def on_spy_bar(bar):
         volume = float(bar.volume),
     )
     bot_state.spy_price = b.close
+    bot_state.last_bar_monotonic = _time.monotonic()   # staleness watcher input
     m_state = momentum_engine.on_bar(b)
 
     # Tick cooldown counter
@@ -138,9 +165,8 @@ async def on_spy_bar(bar):
     orb_filter.on_bar(bar_time, b.high, b.low)
 
     # Fire market-open event on first RTH bar (≥ 09:30 ET)
-    bar_time = b.t.astimezone(config.ET).time()
-    if not _market_open_event.is_set() and bar_time >= datetime.time(9, 30):
-        _open_bar_strikes = compute_dynamic_strikes(b.close, _baseline_atr)
+    if not _market_open_event.is_set() and bar_time >= market_calendar.ET_OPEN:
+        _open_bar_strikes = strikes.compute_dynamic_strikes(b.close, _baseline_atr)
         _market_open_event.set()
         logger.info(
             "Market open bar: SPY=%.2f — option subscription triggered",
@@ -157,7 +183,7 @@ async def on_spy_bar(bar):
     # new_strikes initialised to zero so the BAR log below is always safe pre-market
     new_strikes = {"call_strike": 0.0, "put_strike": 0.0}
     if _market_open_event.is_set():
-        new_strikes = compute_dynamic_strikes(b.close, _baseline_atr)
+        new_strikes = strikes.compute_dynamic_strikes(b.close, _baseline_atr)
         new_meta    = _build_routing_table(new_strikes)
 
         if set(new_meta) != set(_current_subscriptions):
@@ -190,8 +216,10 @@ async def on_spy_bar(bar):
 # ── Trade update handler (order event stream) ─────────────────────────────────
 
 async def on_trade_update(update):
-    """Receives real-time order events — used for logging only for now."""
+    """Real-time order events → OrderManager fill fast-path. A fill confirms
+    in milliseconds via the stream instead of waiting for the next REST poll."""
     try:
+        order_manager.handle_trade_update(update)
         logger.debug("Trade update: event=%s order=%s", update.event, update.order.id)
     except Exception:
         pass
@@ -211,25 +239,15 @@ async def on_option_quote(quote):
     # Quote-driven exit — fires on every tick for the held symbol.
     # asyncio.create_task() schedules the coroutine on the event loop and
     # returns immediately, so close_position() is never called from inside
-    # the stream callback itself.
+    # the stream callback.
     pos = bot_state.position
     if pos and pos.symbol == sym and not bot_state.exit_pending:
-        # Spread filter: if bid/ask spread is abnormally wide, this tick's
-        # quote is unreliable (market-maker pulling quotes, not a real move).
-        # Skip this tick only — the next tick re-evaluates immediately.
-        # If spread stays wide, the 30-second safety net covers the fallback.
-        if bid > 0 and ask > 0:
-            spread_pct = (ask - bid) / ((ask + bid) / 2)
-            if spread_pct > 0.25:
-                logger.debug(
-                    "SPREAD SPIKE %s: bid=%.2f ask=%.2f spread=%.1f%% — skip tick",
-                    sym, bid, ask, spread_pct * 100,
-                )
-                return   # skip this tick, next tick re-evaluates fresh
         asyncio.create_task(_evaluate_exit(bot_state.get_quote(sym)))
         return
 
-    # Entry evaluation
+    # Entry evaluation — ALSO task-spawned: the buy path (submit + fill wait)
+    # must never run inside the quote handler chain, or every other symbol's
+    # quotes (including the just-opened position's) queue behind it.
     if bot_state.position is not None:
         return
     if bot_state.entry_pending:          # buy already in-flight on another quote tick
@@ -237,14 +255,14 @@ async def on_option_quote(quote):
     if sym not in _current_subscriptions:
         return
     if not _entry_lock.locked():
-        await _evaluate_entry(sym)
+        asyncio.create_task(_evaluate_entry(sym))
 
 
 # ── Entry evaluation ──────────────────────────────────────────────────────────
 
 async def _evaluate_entry(symbol: str):
     async with _entry_lock:
-        if bot_state.position is not None:
+        if bot_state.position is not None or bot_state.entry_pending:
             return
         if not risk_manager.can_trade():
             return
@@ -256,6 +274,24 @@ async def _evaluate_entry(symbol: str):
         quote   = bot_state.get_quote(symbol)
         tracker = bot_state.get_tracker(symbol)
         if quote is None:
+            return
+
+        # Freshness gate: a queued entry task (e.g. behind another entry's
+        # 30s fill wait) must not size a trade off a quote from before the
+        # wait — the market has moved and the signal never saw this price.
+        if (quote.recv_monotonic > 0
+                and _time.monotonic() - quote.recv_monotonic > config.ENTRY_QUOTE_MAX_AGE_SEC):
+            logger.debug("SKIP %s | quote stale (%.1fs old)", symbol,
+                         _time.monotonic() - quote.recv_monotonic)
+            return
+
+        # Entry-side quote quality gate: a mid computed inside a wide (or
+        # one-sided) spread is not a price — don't size a trade off it.
+        if quote.spread_pct > config.ENTRY_MAX_SPREAD_PCT:
+            logger.debug(
+                "SKIP %s | entry spread %.1f%% > %.1f%%",
+                symbol, quote.spread_pct * 100, config.ENTRY_MAX_SPREAD_PCT * 100,
+            )
             return
 
         should_enter = check_entry(
@@ -277,57 +313,75 @@ async def _evaluate_entry(symbol: str):
 
         entry_mid   = quote.mid
         qty         = risk_manager.size_trade(entry_mid)
+        if qty <= 0:
+            return   # cannot size within risk limits — sizing already logged why
         limit_price = round(entry_mid * 1.02, 2)
 
         logger.info("Placing entry: %s qty=%d limit=%.2f", symbol, qty, limit_price)
 
-        # Set entry_pending before the async buy so any concurrent quote ticks
-        # (including CancelledError scenarios) see a buy is already in-flight.
+        # entry_pending covers the ENTIRE window from order submission until
+        # the position is tracked locally — the ghost sweeper stands down
+        # while it is set, so a fill that lands on Alpaca moments before
+        # open_position() cannot be mistaken for a ghost and force-closed.
         bot_state.entry_pending = True
         try:
             order = await order_manager.buy_limit(symbol, qty, limit_price)
+
+            if order is None:
+                logger.warning("Entry failed/timed out for %s — no fill adopted", symbol)
+                return
+
+            fill_price = order_manager.get_fill_price(order)
+            filled_qty = order_manager.get_filled_qty(order)
+            if fill_price is None or filled_qty <= 0:
+                # A fill without a usable price cannot be tracked coherently.
+                # Loud log; if contracts actually exist the ghost sweeper
+                # reaps them on the next bar once entry_pending clears.
+                logger.error(
+                    "Fill price/qty unavailable for %s (order %s) — NOT tracking; "
+                    "ghost sweeper will reconcile against the broker",
+                    symbol, order.id,
+                )
+                return
+            if filled_qty < qty:
+                logger.warning(
+                    "PARTIAL entry fill: %d/%d contracts — adopting filled portion",
+                    filled_qty, qty,
+                )
+
+            pos = Position(
+                symbol           = symbol,
+                side             = side,
+                strike           = strike,
+                qty              = filled_qty,
+                entry_price      = fill_price,
+                entry_time       = datetime.datetime.now(tz=config.ET),
+                order_id         = str(order.id),
+                entry_spy_price  = bot_state.spy_price,
+                entry_atr5       = momentum_engine.state.atr5,
+                entry_bid        = quote.bid,
+                entry_ask        = quote.ask,
+            )
+            bot_state.open_position(pos)
+            logger.info(
+                "ENTERED: %s at %.2f × %d | TP=%.2f | Stop=%.2f | slippage=%+.3f vs decision mid",
+                symbol, fill_price, filled_qty,
+                round(fill_price * config.TP_MULT,   2),
+                round(fill_price * config.STOP_MULT, 2),
+                fill_price - entry_mid,
+            )
         finally:
+            # Cleared only after open_position (or a definitive no-fill) —
+            # see the ghost-sweeper invariant above.
             bot_state.entry_pending = False
-
-        if order is None:
-            logger.warning("Entry failed/timed out for %s — cancelling all option orders",
-                           symbol)
-            order_manager.cancel_all_options()   # clean up any ghost orders
-            return
-
-        fill_price = order_manager.get_fill_price(order)
-        if fill_price <= 0:
-            logger.warning("Fill price unavailable for %s", symbol)
-            order_manager.cancel_all_options()
-            return
-
-        pos = Position(
-            symbol           = symbol,
-            side             = side,
-            strike           = strike,
-            qty              = qty,
-            entry_price      = fill_price,
-            entry_time       = datetime.datetime.now(tz=config.ET),
-            order_id         = str(order.id),
-            entry_spy_price  = bot_state.spy_price,
-            entry_atr5       = momentum_engine.state.atr5,
-        )
-        bot_state.open_position(pos)
-        logger.info(
-            "ENTERED: %s at %.2f × %d | TP=%.2f | Stop=%.2f",
-            symbol, fill_price, qty,
-            round(fill_price * config.TP_MULT,   2),
-            round(fill_price * config.STOP_MULT, 2),
-        )
 
 
 # ── Trade list display ────────────────────────────────────────────────────────
 
 def _print_trades():
     """Print today's closed trades from trades_YYYY-MM-DD.csv to the terminal."""
-    today    = datetime.date.today()
-    log_path = os.path.join(config.LOG_DIR, f"trades_{today.strftime('%Y-%m-%d')}.csv")
-    today    = today.isoformat()
+    today    = config.today_et().isoformat()
+    log_path = os.path.join(config.LOG_DIR, f"trades_{today}.csv")
 
     if not os.path.exists(log_path):
         print("  No trades log found.")
@@ -401,23 +455,26 @@ def _restore_daily_pnl():
     Read today's closed trades from trades_YYYY-MM-DD.csv and restore risk manager counters.
     Called after reset_day() so a restart doesn't wipe the session P&L.
     """
-    today    = datetime.date.today()
-    log_path = os.path.join(config.LOG_DIR, f"trades_{today.strftime('%Y-%m-%d')}.csv")
-    today    = today.isoformat()
+    today    = config.today_et().isoformat()
+    log_path = os.path.join(config.LOG_DIR, f"trades_{today}.csv")
     if not os.path.exists(log_path):
         return
 
-    daily_pnl    = 0.0
-    trades_today = 0
+    daily_pnl = 0.0
+    entries   = set()   # distinct positions — partial exit legs share an
+    rows      = 0       # entry_order_id and must count as ONE trade
     try:
         with open(log_path, newline="") as f:
             for row in csv.DictReader(f):
                 if row.get("date") == today:
-                    daily_pnl    += float(row.get("realized_pnl", 0))
-                    trades_today += 1
+                    daily_pnl += float(row.get("realized_pnl", 0))
+                    rows      += 1
+                    if row.get("entry_order_id"):
+                        entries.add(row["entry_order_id"])
     except Exception as e:
         logger.warning("Could not restore daily P&L from CSV: %s", e)
         return
+    trades_today = len(entries) if entries else rows
 
     if trades_today > 0:
         risk_manager.restore_day(daily_pnl, trades_today)
@@ -425,61 +482,85 @@ def _restore_daily_pnl():
         logger.info("No trades found in CSV for today — starting fresh.")
 
 
-# ── OCC symbol parser ─────────────────────────────────────────────────────────
-
-def _parse_occ_symbol(symbol: str):
-    """
-    Parse an OCC symbol like SPY260520C00740000.
-    Returns (side, strike) or (None, None) on failure.
-    """
-    m = re.match(r'^([A-Z]+)(\d{6})([CP])(\d{8})$', symbol)
-    if not m:
-        return None, None
-    side   = "call" if m.group(3) == "C" else "put"
-    strike = int(m.group(4)) / 1000.0
-    return side, strike
-
-
 # ── Position recovery (called at startup after a restart) ─────────────────────
 
 def _recover_open_position():
     """
     On startup, poll Alpaca REST for any existing option position.
-    If found, reconstruct BotState so the exit monitor picks it up immediately.
-    Called synchronously before the asyncio loop takes over.
+
+    Two-source recovery: the broker is authoritative for WHETHER a position
+    exists and its quantity; logs/position_state.json is authoritative for
+    the entry CONTEXT (real entry time/price, SPY level at entry, atr5 at
+    entry, decision quote). A REST-only recovery loses all of that — the
+    SPY-level stop gets disabled and TP/stop/trail run off Alpaca's
+    day-average basis instead of the actual fill.
     """
+    persisted = BotState.load_persisted_position()
     try:
         positions = order_manager.get_open_positions()
-        for p in positions:
-            if p.asset_class != AssetClass.US_OPTION:
-                continue
-            symbol = p.symbol
-            side, strike = _parse_occ_symbol(symbol)
-            if side is None:
-                logger.warning("Could not parse recovered position symbol: %s", symbol)
-                continue
-            qty          = int(float(p.qty))
-            entry_price  = float(p.avg_entry_price)
-            recovered    = Position(
-                symbol      = symbol,
-                side        = side,
-                strike      = strike,
-                qty         = qty,
-                entry_price = entry_price,
-                entry_time  = datetime.datetime.now(tz=config.ET),   # approx
-                order_id    = "recovered",
-            )
-            bot_state.open_position(recovered)
-            logger.info(
-                "RECOVERED position from Alpaca: %s entry=%.2f qty=%d | "
-                "TP=%.2f Stop=%.2f",
-                symbol, entry_price, qty,
-                round(entry_price * config.TP_MULT,   2),
-                round(entry_price * config.STOP_MULT, 2),
-            )
-            return   # only one position at a time
     except Exception as e:
         logger.warning("Position recovery check failed: %s", e)
+        return
+
+    found = False
+    for p in positions:
+        if p.asset_class != AssetClass.US_OPTION:
+            continue
+        symbol = p.symbol
+        side, strike = parse_occ_symbol(symbol)
+        if side is None:
+            logger.warning("Could not parse recovered position symbol: %s", symbol)
+            continue
+        broker_qty = int(float(p.qty))
+
+        # One constructor for both recovery modes: broker-derived identity
+        # plus a metadata overlay from the state file when it matches. Two
+        # hand-maintained constructors is how a new Position field silently
+        # misses the rarer degraded branch.
+        meta = persisted if (persisted and persisted.get("symbol") == symbol) else {}
+        pos = Position(
+            symbol          = symbol,
+            side            = side,
+            strike          = strike,
+            qty             = broker_qty,          # broker qty is authoritative
+            entry_price     = float(meta.get("entry_price", 0.0) or p.avg_entry_price),
+            entry_time      = (datetime.datetime.fromisoformat(meta["entry_time"])
+                               if meta.get("entry_time")
+                               else datetime.datetime.now(tz=config.ET)),   # approx
+            order_id        = meta.get("order_id", "recovered"),
+            entry_spy_price = float(meta.get("entry_spy_price", 0.0)),
+            entry_atr5      = float(meta.get("entry_atr5", 0.0)),
+            entry_bid       = float(meta.get("entry_bid", 0.0)),
+            entry_ask       = float(meta.get("entry_ask", 0.0)),
+            peak_mid        = float(meta.get("peak_mid", 0.0)),
+        )
+        if meta:
+            logger.info(
+                "RECOVERED position (full metadata): %s entry=%.2f qty=%d "
+                "entry_spy=%.2f atr5=%.3f | TP=%.2f Stop=%.2f",
+                symbol, pos.entry_price, broker_qty,
+                pos.entry_spy_price, pos.entry_atr5,
+                round(pos.entry_price * config.TP_MULT,   2),
+                round(pos.entry_price * config.STOP_MULT, 2),
+            )
+        else:
+            logger.warning(
+                "RECOVERED position (DEGRADED — no state file): %s entry=%.2f qty=%d | "
+                "TP=%.2f Stop=%.2f | SPY-level stop DISABLED (entry SPY unknown)",
+                symbol, pos.entry_price, broker_qty,
+                round(pos.entry_price * config.TP_MULT,   2),
+                round(pos.entry_price * config.STOP_MULT, 2),
+            )
+        bot_state.open_position(pos)
+        found = True
+        break   # only one position at a time
+
+    if not found and persisted:
+        logger.warning(
+            "Stale position state file for %s (no matching broker position) — clearing.",
+            persisted.get("symbol"),
+        )
+        bot_state._clear_persisted_position()
 
 
 # ── Dynamic re-subscription watcher ──────────────────────────────────────────
@@ -519,7 +600,7 @@ async def _resubscribe_watcher():
             move, _last_sub_spy_price, spy,
         )
 
-        new_strikes = compute_dynamic_strikes(spy, _baseline_atr)
+        new_strikes = strikes.compute_dynamic_strikes(spy, _baseline_atr)
         new_symbols = new_strikes["call_symbols"] + new_strikes["put_symbols"]
 
         # Always keep the held symbol — exit monitor depends on its quotes
@@ -541,9 +622,8 @@ async def _resubscribe_watcher():
         # Routing table is already updated above, so entry logic stays correct
         # even if the WebSocket expansion fails or times out.
         try:
-            loop = asyncio.get_event_loop()
             await asyncio.wait_for(
-                loop.run_in_executor(None, _feed.add_option_symbols, new_symbols),
+                asyncio.to_thread(_feed.add_option_symbols, new_symbols),
                 timeout=5.0,
             )
             logger.info(
@@ -569,8 +649,8 @@ async def _option_subscriber():
     logger.info("Option subscriber waiting for market open (09:30 ET)...")
     await _market_open_event.wait()
 
-    strikes  = _open_bar_strikes
-    all_syms = strikes["call_symbols"] + strikes["put_symbols"]
+    strikes_dict = _open_bar_strikes
+    all_syms = strikes_dict["call_symbols"] + strikes_dict["put_symbols"]
 
     # If we recovered a position on restart, pin its symbol even if outside window
     pos      = bot_state.position
@@ -580,12 +660,12 @@ async def _option_subscriber():
         logger.info("Recovered position symbol pinned at open subscription: %s", held_sym)
 
     # Populate routing table — each symbol keyed to its own actual strike
-    _current_subscriptions.update(_build_routing_table(strikes))
+    _current_subscriptions.update(_build_routing_table(strikes_dict))
 
     _feed.subscribe_options(all_syms)
     logger.info(
         "Subscribed at open: call=%.2f put=%.2f | %d symbols",
-        strikes["call_strike"], strikes["put_strike"], len(all_syms),
+        strikes_dict["call_strike"], strikes_dict["put_strike"], len(all_syms),
     )
     # One-shot task — sleep until cancelled so _guarded doesn't restart it
     await asyncio.sleep(float("inf"))
@@ -598,47 +678,203 @@ async def _check_ghost_positions():
     Called on every 1-min bar close. Fetches all open option positions from
     Alpaca REST and closes any that are NOT tracked in bot_state.
 
-    Ghost positions arise when a buy_limit order fills on Alpaca after a
-    CancelledError disrupts local tracking. Without this sweeper they sit
-    open and unmonitored until the next restart (potentially hours).
+    Ghost positions arise when a buy fills on Alpaca after a CancelledError
+    disrupts local tracking. Without this sweeper they sit open and
+    unmonitored until the next restart (potentially hours).
 
-    Max detection window: 60 seconds (one bar). Ghost is closed immediately
-    once detected regardless of exit_pending or other state.
+    SCOPE: only THIS BOT's universe — the configured underlying with today's
+    expiry. The account may hold other real positions (manual trades, other
+    strategies, longer-dated options); sweeping account-wide would liquidate
+    them. Foreign positions are logged once per symbol, never touched.
+
+    Stand-down conditions (both re-checked AFTER the REST await):
+      - exit_pending:  a tracked close is in flight — don't interfere
+      - entry_pending: a buy may have filled on Alpaca an instant before
+        local tracking exists; sweeping now would close a REAL position
+    Single-flight: overlapping sweeps (slow REST + 1-min cadence) are skipped.
     """
-    if bot_state.exit_pending:
-        return   # don't interfere while a tracked exit is in-flight
-    try:
-        alpaca_positions = order_manager.get_open_positions()
-    except Exception as e:
-        logger.debug("Ghost sweep REST call failed: %s", e)
+    if bot_state.exit_pending or bot_state.entry_pending:
         return
+    if _ghost_sweep_lock.locked():
+        return
+    async with _ghost_sweep_lock:
+        alpaca_positions = await order_manager.get_open_positions_async()
 
-    for p in alpaca_positions:
-        try:
-            if p.asset_class != AssetClass.US_OPTION:
+        # State may have moved while we were polling — re-check before acting.
+        if bot_state.exit_pending or bot_state.entry_pending:
+            return
+
+        for p in alpaca_positions:
+            try:
+                if p.asset_class != AssetClass.US_OPTION:
+                    continue
+                sym     = p.symbol
+                qty     = int(float(p.qty))
+                avg_px  = float(p.avg_entry_price or 0)
+                tracked = bot_state.position
+
+                # Out-of-scope positions are NOT ours to touch
+                if (not sym.startswith(config.UNDERLYING)
+                        or parse_occ_expiry(sym) != config.today_et()):
+                    if sym not in _foreign_positions_seen:
+                        _foreign_positions_seen.add(sym)
+                        logger.info(
+                            "Ghost sweep: ignoring out-of-scope position %s "
+                            "(not %s 0DTE — not this bot's)", sym, config.UNDERLYING,
+                        )
+                    continue
+
+                if tracked is not None and tracked.symbol == sym:
+                    # Our known position — but reconcile QUANTITY: a
+                    # partial-fill adoption race can leave the broker holding
+                    # more contracts than we track; the excess is unmanaged.
+                    excess = qty - tracked.qty_remaining
+                    if excess > 0:
+                        logger.warning(
+                            "QTY MISMATCH: broker holds %d of %s, tracked %d — "
+                            "closing %d excess contract(s)",
+                            qty, sym, tracked.qty_remaining, excess,
+                        )
+                        order = await order_manager.close_position(sym, excess)
+                        fill  = order_manager.get_fill_price(order)
+                        if fill is not None:
+                            pnl = (fill - avg_px) * excess * 100
+                            logger.warning("GHOST CLOSED: %s fill=%.2f pnl=$%.2f",
+                                           sym, fill, pnl)
+                    continue
+
+                logger.warning(
+                    "GHOST POSITION DETECTED: %s qty=%d avg=%.2f — closing immediately",
+                    sym, qty, avg_px,
+                )
+                order = await order_manager.close_position(sym, qty)
+                fill  = order_manager.get_fill_price(order)
+                if fill is not None:
+                    pnl = (fill - avg_px) * qty * 100
+                    logger.warning(
+                        "GHOST CLOSED: %s fill=%.2f pnl=$%.2f",
+                        sym, fill, pnl,
+                    )
+                else:
+                    logger.error(
+                        "GHOST CLOSE UNCONFIRMED for %s — will retry next bar", sym,
+                    )
+            except Exception as e:
+                logger.error("Ghost close failed for %s: %s",
+                             p.symbol if hasattr(p, 'symbol') else '?', e)
+
+
+# ── Centralized exit executor ─────────────────────────────────────────────────
+
+async def _execute_exit(reason: str) -> bool:
+    """
+    THE single path from "exit decided" to "exit booked". All exit triggers
+    (TP/stop/trail, SPY stop, staleness, time stop, shutdown) route here.
+
+    Invariants:
+      - Books into the CSV ONLY on a broker-confirmed fill (full or partial).
+        No fill → no row. Never a guessed price.
+      - A failed close keeps the position TRACKED and retries with backoff.
+        It never erases local state while the broker still holds the position
+        (that combination made the ghost sweeper re-close it and the P&L got
+        counted twice — once fictitious, once real).
+      - After _CLOSE_MAX_ATTEMPTS failures: leave the position tracked, lock
+        the risk gate, log CRITICAL. The exit monitor keeps re-triggering.
+    """
+    pos = bot_state.position
+    if pos is None or bot_state.exit_pending:
+        return False
+    # Set BEFORE the first await — asyncio is cooperative, so no other task
+    # can run between the check above and this assignment.
+    bot_state.exit_pending = True
+
+    def _book(fill: float, fqty: int, order_id: str, exit_bid: float, exit_ask: float):
+        """Book one confirmed leg; when the position fully closes, record the
+        trade ONCE with the position's cumulative net P&L (partial legs are
+        still one trade — double record_trade corrupts trades_today/cooldown)."""
+        bot_state.book_exit_fill(
+            fill, reason, qty=fqty, exit_order_id=order_id,
+            exit_bid=exit_bid, exit_ask=exit_ask,
+        )
+        if bot_state.position is None:
+            risk_manager.record_trade(pos.booked_pnl)
+            icon = "✅" if pos.booked_pnl >= 0 else "❌"
+            logger.info(
+                "%s %s: %s fill=%.2f pnl=$%.2f | daily=$%.2f trades=%d",
+                icon, reason.upper(), pos.symbol, fill,
+                pos.booked_pnl, risk_manager.daily_pnl, risk_manager.trades_today,
+            )
+            return True
+        return False
+
+    try:
+        quote    = bot_state.get_quote(pos.symbol)
+        exit_bid = quote.bid if quote else 0.0
+        exit_ask = quote.ask if quote else 0.0
+
+        for attempt in range(1, _CLOSE_MAX_ATTEMPTS + 1):
+            order = await order_manager.close_position(pos.symbol, pos.qty_remaining)
+            fill  = order_manager.get_fill_price(order)
+            fqty  = order_manager.get_filled_qty(order)
+
+            if fill is not None and fqty > 0:
+                if _book(fill, fqty, str(order.id), exit_bid, exit_ask):
+                    return True
+                # Partial close confirmed — retry the remainder immediately
+                logger.warning(
+                    "EXIT partially filled (%d left) — retrying remainder "
+                    "(attempt %d/%d)", bot_state.position.qty_remaining,
+                    attempt, _CLOSE_MAX_ATTEMPTS,
+                )
                 continue
-            sym     = p.symbol
-            qty     = int(float(p.qty))
-            avg_px  = float(p.avg_entry_price or 0)
-            tracked = bot_state.position
 
-            # Close if Alpaca has a position we don't know about locally
-            if tracked is not None and tracked.symbol == sym:
-                continue   # this is our known position — leave it alone
+            # No confirmed fill. A timed-out market close is left LIVE (never
+            # blindly cancelled), so it may have filled after we gave up —
+            # reconcile against the broker before retrying: if the position
+            # is gone, find the real fill in order history and book THAT.
+            broker = await order_manager.get_open_positions_async()
+            if not any(p.symbol == pos.symbol for p in broker):
+                lost = await order_manager.find_recent_close_fill(pos.symbol)
+                if lost is not None:
+                    logger.warning(
+                        "EXIT reconciled from order history: %s filled %d @ %.2f "
+                        "after fill-wait gave up", pos.symbol,
+                        order_manager.get_filled_qty(lost),
+                        order_manager.get_fill_price(lost),
+                    )
+                    if _book(order_manager.get_fill_price(lost),
+                             order_manager.get_filled_qty(lost),
+                             str(lost.id), exit_bid, exit_ask):
+                        return True
+                    continue
+                logger.critical(
+                    "EXIT DESYNC: broker shows no %s position but no filled close "
+                    "order found — keeping tracked. *** RECONCILE MANUALLY. ***",
+                    pos.symbol,
+                )
 
             logger.warning(
-                "GHOST POSITION DETECTED: %s qty=%d avg=%.2f — closing immediately",
-                sym, qty, avg_px,
+                "EXIT attempt %d/%d got no confirmed fill for %s (reason=%s) — retrying",
+                attempt, _CLOSE_MAX_ATTEMPTS, pos.symbol, reason,
             )
-            order = await order_manager.close_position(sym, qty)
-            fill  = order_manager.get_fill_price(order) if order else 0.0
-            pnl   = (fill - avg_px) * qty * 100
-            logger.warning(
-                "GHOST CLOSED: %s fill=%.2f pnl=$%.2f",
-                sym, fill, pnl,
-            )
-        except Exception as e:
-            logger.error("Ghost close failed for %s: %s", p.symbol if hasattr(p, 'symbol') else '?', e)
+            await asyncio.sleep(min(2 * attempt, 6))
+
+        # All attempts exhausted. Position (or its remainder) stays TRACKED
+        # and NOTHING extra is recorded — record_trade fires only when the
+        # last leg eventually closes (the exit monitor keeps retriggering).
+        risk_manager.lock("close orders failing — manual attention required")
+        logger.critical(
+            "EXIT FAILED after %d attempts: %s qty=%d (reason=%s). Position remains "
+            "tracked; exit monitor will keep retrying. *** CHECK ALPACA. ***",
+            _CLOSE_MAX_ATTEMPTS, pos.symbol,
+            bot_state.position.qty_remaining if bot_state.position else 0, reason,
+        )
+        return False
+    finally:
+        # book_exit_fill clears exit_pending on full close; make sure a
+        # failure path leaves the flag down so retries can run.
+        if bot_state.position is not None:
+            bot_state.exit_pending = False
 
 
 # ── SPY-level stop (bar-driven) ───────────────────────────────────────────────
@@ -671,23 +907,7 @@ async def _evaluate_spy_stop(spy_close: float):
         pos.side, pos.entry_spy_price, spy_close, buf,
         pos.entry_atr5, config.SPY_STOP_ATR_MULT,
     )
-
-    bot_state.exit_pending = True
-    quote = bot_state.get_quote(pos.symbol)
-    mid   = quote.mid if quote else pos.entry_price * config.STOP_MULT
-
-    order = await order_manager.close_position(pos.symbol, pos.qty_remaining)
-    fill  = order_manager.get_fill_price(order) if order else mid
-
-    pnl = bot_state.close_position(fill, "spy_stop")
-    bot_state.exit_pending = False
-    risk_manager.record_trade(pnl)
-
-    icon = "✅" if pnl >= 0 else "❌"
-    logger.info(
-        "%s SPY_STOP: %s fill=%.2f pnl=$%.2f | daily=$%.2f trades=%d",
-        icon, pos.symbol, fill, pnl, risk_manager.daily_pnl, risk_manager.trades_today,
-    )
+    await _execute_exit("spy_stop")
 
 
 # ── Exit evaluation (quote-driven) ────────────────────────────────────────────
@@ -697,11 +917,7 @@ async def _evaluate_exit(quote):
     Evaluates TP / stop / peak trail on every option quote tick for the
     held symbol. Called via asyncio.create_task() from on_option_quote,
     so close_position() never executes inside the stream callback.
-
-    Race-condition safety: exit_pending is set to True before the first
-    await. Because asyncio is cooperative, no other task can run between
-    the exit_pending check and the exit_pending = True assignment — there
-    is no await between those two lines.
+    Order submission and booking are delegated to _execute_exit().
     """
     pos = bot_state.position
     if pos is None or bot_state.exit_pending:
@@ -712,6 +928,33 @@ async def _evaluate_exit(quote):
     mid        = quote.mid
     tp_price   = pos.entry_price * config.TP_MULT
     stop_price = pos.entry_price * config.STOP_MULT
+
+    # Wide-spread / one-sided-quote handling: a mid computed inside a
+    # blown-out spread is not a price, so trail decisions and peak updates
+    # skip the tick. But the position does NOT go blind — dislocations are
+    # exactly when exits must keep working — decisions fall back to the
+    # EXECUTABLE side:
+    #   - stop on the bid (what a market sell receives). When the bid is
+    #     pulled entirely (bid=0), Quote.mid falls back to the ask — if even
+    #     the ask is at/below the stop, the position is gone; exit.
+    #   - TP on the bid: if the bid ALONE clears the target, that gain is
+    #     executable regardless of how wide the ask is.
+    if quote.spread_pct > config.EXIT_WIDE_SPREAD_PCT:
+        executable = quote.bid if quote.bid > 0 else mid
+        if executable > 0 and executable <= stop_price:
+            logger.warning(
+                "STOP on wide/one-sided spread: executable=%.2f <= stop=%.2f "
+                "(bid=%.2f ask=%.2f)",
+                executable, stop_price, quote.bid, quote.ask,
+            )
+            await _execute_exit("stop")
+        elif quote.bid >= tp_price:
+            logger.info(
+                "TP on wide spread: bid=%.2f >= tp=%.2f — gain is executable",
+                quote.bid, tp_price,
+            )
+            await _execute_exit("tp")
+        return
 
     # Update peak mid — monotonically increasing, safe under concurrency
     if mid > pos.peak_mid:
@@ -741,22 +984,9 @@ async def _evaluate_exit(quote):
     else:
         return
 
-    # Set exit_pending BEFORE first await — prevents duplicate exit tasks
-    bot_state.exit_pending = True
     logger.info("EXIT signal: reason=%s mid=%.2f tp=%.2f stop=%.2f",
                 reason, mid, tp_price, stop_price)
-
-    order = await order_manager.close_position(pos.symbol, pos.qty_remaining)
-    fill  = order_manager.get_fill_price(order) if order else mid
-
-    pnl = bot_state.close_position(fill, reason)
-    bot_state.exit_pending = False
-    risk_manager.record_trade(pnl)
-
-    icon = "✅" if pnl >= 0 else "❌"
-    logger.info("%s %s: %s fill=%.2f pnl=$%.2f | daily=$%.2f trades=%d",
-                icon, reason.upper(), pos.symbol, fill,
-                pnl, risk_manager.daily_pnl, risk_manager.trades_today)
+    await _execute_exit(reason)
 
 
 # ── Exit monitor (30-second safety net) ───────────────────────────────────────
@@ -779,6 +1009,71 @@ async def _exit_monitor():
             continue
 
         asyncio.create_task(_evaluate_exit(quote))
+
+
+# ── Data staleness kill switch ────────────────────────────────────────────────
+
+async def _staleness_watcher():
+    """
+    The exit monitor re-evaluates CACHED quotes — if the option stream dies
+    silently (no exception, just no messages), it chews the same stale quote
+    forever while the position flies blind. This watcher measures actual
+    receive-time age and acts:
+
+      - Holding + no fresh quote for the held symbol in
+        STALE_QUOTE_FLATTEN_SEC → flatten via _execute_exit ("stale_data").
+        close_position() needs no quotes, so this works even with a dead feed.
+      - No SPY bar in STALE_BAR_WARN_SEC during the session → lock new
+        entries (bars drive the SPY stop and the ghost sweeper) and log
+        CRITICAL. Existing quote-driven exits keep working.
+    """
+    await _market_open_event.wait()
+    no_quote_since: float = 0.0   # first time we saw a held position with NO cached quote
+    while True:
+        await asyncio.sleep(5)
+        now_m = _time.monotonic()
+
+        now_hhmm = datetime.datetime.now(tz=config.ET).strftime("%H:%M")
+        if now_hhmm >= config.TIME_STOP:
+            continue   # time-stop path owns the endgame
+
+        pos = bot_state.position
+        if pos is not None and not bot_state.exit_pending:
+            q = bot_state.get_quote(pos.symbol)
+            if q is not None and q.recv_monotonic > 0:
+                no_quote_since = 0.0
+                age = now_m - q.recv_monotonic
+                if age > config.STALE_QUOTE_FLATTEN_SEC:
+                    logger.critical(
+                        "DATA STALENESS: no quote for held %s in %.0fs — flattening",
+                        pos.symbol, age,
+                    )
+                    await _execute_exit("stale_data")
+            else:
+                # NO quote has EVER arrived for the held symbol (recovered
+                # position + dead/failed subscription). The age check can't
+                # run, so time it ourselves — this is the fully-blind case
+                # the kill switch exists for.
+                if no_quote_since == 0.0:
+                    no_quote_since = now_m
+                elif now_m - no_quote_since > config.STALE_QUOTE_FLATTEN_SEC:
+                    logger.critical(
+                        "DATA STALENESS: held %s has received NO quotes for %.0fs "
+                        "— flattening blind (market close needs no quotes)",
+                        pos.symbol, now_m - no_quote_since,
+                    )
+                    await _execute_exit("stale_data")
+        else:
+            no_quote_since = 0.0
+
+        if bot_state.last_bar_monotonic > 0:
+            bar_age = now_m - bot_state.last_bar_monotonic
+            if bar_age > config.STALE_BAR_WARN_SEC and not risk_manager.locked:
+                logger.critical(
+                    "DATA STALENESS: no SPY bar in %.0fs — locking new entries "
+                    "(SPY stop and ghost sweeper are bar-driven)", bar_age,
+                )
+                risk_manager.lock("SPY bar stream stale")
 
 
 # ── Task wrapper ───────────────────────────────────────────────────────────────
@@ -854,19 +1149,22 @@ def _print_status():
         max_sign = "+" if pos.max_unreal_pnl >= 0 else ""
 
         # SPY stop level (adaptive: 0.75 × atr5_at_entry, floored at SPY_STOP_FLOOR)
-        spy_buf = max(config.SPY_STOP_FLOOR, config.SPY_STOP_ATR_MULT * pos.entry_atr5)
-        spy_stop_level = (
-            round(pos.entry_spy_price - spy_buf, 2)
-            if pos.side == "call"
-            else round(pos.entry_spy_price + spy_buf, 2)
-        )
-        spy_arrow = "↓" if pos.side == "call" else "↑"
+        if pos.entry_spy_price > 0:
+            spy_buf = max(config.SPY_STOP_FLOOR, config.SPY_STOP_ATR_MULT * pos.entry_atr5)
+            spy_stop_level = (
+                round(pos.entry_spy_price - spy_buf, 2)
+                if pos.side == "call"
+                else round(pos.entry_spy_price + spy_buf, 2)
+            )
+            spy_arrow    = "↓" if pos.side == "call" else "↑"
+            spy_stop_str = f"Entry SPY ${pos.entry_spy_price:.2f}  SPY stop {spy_arrow}${spy_stop_level:.2f}"
+        else:
+            spy_stop_str = "SPY stop OFF (degraded recovery)"
 
         lines += [
             "  " + "·" * 56,
             f"  POSITION: {pos.symbol}  ({pos.side.upper()} ${pos.strike:.0f})  |  in trade {time_in_trade}",
-            f"  Entry ${pos.entry_price:.2f}  ×  {pos.qty_remaining} contracts  |  "
-            f"Entry SPY ${pos.entry_spy_price:.2f}  SPY stop {spy_arrow}${spy_stop_level:.2f}",
+            f"  Entry ${pos.entry_price:.2f}  ×  {pos.qty_remaining} contracts  |  {spy_stop_str}",
             f"  Mid   ${current_mid:.2f}  ({pct_chg:+.0f}%)  |  "
             f"TP ${tp_price:.2f}  Stop ${stop_price:.2f}  |  {trail_str}",
             f"  Unrealised P&L: {pnl_sign}${unreal_pnl:.2f}  |  "
@@ -890,13 +1188,37 @@ def _print_status():
 
 # ── Time stop ─────────────────────────────────────────────────────────────────
 
-async def _time_stop_watcher(feed: FeedManager):
+async def _wait_for_pending_ops(timeout: float, context: str) -> None:
+    """
+    Bounded wait for any in-flight entry or exit to finish before an endgame
+    path (time stop, shutdown) acts. Acting while an operation is in flight
+    causes real damage: cancelling an in-flight close order and then no-oping
+    on the exit_pending guard leaves the position open; racing a mid-retry
+    exit submits duplicate closes and books twice; sweeping during an entry
+    fill closes an untracked-but-real position.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while ((bot_state.exit_pending or bot_state.entry_pending)
+           and asyncio.get_running_loop().time() < deadline):
+        logger.info("%s: waiting for in-flight %s to finish...",
+                    context, "exit" if bot_state.exit_pending else "entry")
+        await asyncio.sleep(1)
+    if bot_state.exit_pending or bot_state.entry_pending:
+        logger.warning("%s: in-flight operation still pending after %.0fs — proceeding",
+                       context, timeout)
+
+
+async def _time_stop_watcher():
     while True:
         await asyncio.sleep(10)
         now_et = datetime.datetime.now(tz=config.ET).strftime("%H:%M")
         if now_et >= config.TIME_STOP:
             logger.info("TIME STOP reached (%s). Closing all positions.", config.TIME_STOP)
-            await _force_close_all()
+            # Let any in-flight entry/exit settle first: an entry may be about
+            # to produce a position (which we must then close and book), and
+            # racing an in-flight exit would double-close and double-book.
+            await _wait_for_pending_ops(60, "TIME STOP")
+            await _execute_exit("time_stop")
             await _confirm_flat_and_exit()
             return   # unreachable — _confirm_flat_and_exit calls os._exit
 
@@ -914,15 +1236,17 @@ async def _confirm_flat_and_exit():
       watchdog thread dies with the process, so there is no restart loop.
 
     Safety: we only exit after Alpaca confirms flat. If a position somehow
-    survived the force-close, we retry the close a few times and log loudly.
-    We still exit afterwards (a process past TIME STOP can do nothing useful),
-    but the WARNING makes any residual position visible for manual handling.
+    survived the force-close, we retry the close a few times — and if the
+    residual is OUR tracked position, a confirmed fill is booked properly so
+    the record stays truthful. We still exit afterwards (a process past TIME
+    STOP can do nothing useful), but the WARNING makes any residual position
+    visible for manual handling.
     """
     MAX_CLOSE_ATTEMPTS = 8
     for attempt in range(1, MAX_CLOSE_ATTEMPTS + 1):
         try:
             open_opts = [
-                p for p in order_manager.get_open_positions()
+                p for p in await order_manager.get_open_positions_async()
                 if p.asset_class == AssetClass.US_OPTION
             ]
         except Exception as e:
@@ -942,7 +1266,15 @@ async def _confirm_flat_and_exit():
                 p.symbol, p.qty, attempt, MAX_CLOSE_ATTEMPTS,
             )
             try:
-                await order_manager.close_position(p.symbol, int(float(p.qty)))
+                pos = bot_state.position
+                if pos is not None and pos.symbol == p.symbol:
+                    # OUR tracked residual — route through the single booking
+                    # path (confirmed fills, partial retries, one record_trade
+                    # per position) rather than re-implementing it inline.
+                    await _execute_exit("time_stop")
+                else:
+                    # Untracked residual — hand-close, log only (ghost class)
+                    await order_manager.close_position(p.symbol, int(float(p.qty)))
             except Exception as e:
                 logger.error("TIME STOP retry close failed for %s: %s", p.symbol, e)
         await asyncio.sleep(2)
@@ -955,31 +1287,66 @@ async def _confirm_flat_and_exit():
     os._exit(0)
 
 
-async def _force_close_all():
-    pos = bot_state.position
-    if pos is None:
-        return
-    order = await order_manager.close_position(pos.symbol, pos.qty_remaining)
-    fill  = order_manager.get_fill_price(order) if order else pos.entry_price * 0.5
-    pnl   = bot_state.close_position(fill, "time_stop")
-    risk_manager.record_trade(pnl)
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
-    global _feed, _baseline_atr, _market_open_event
+    global _feed, _baseline_atr, _market_open_event, _WATCHDOG_END
+
+    config.validate_credentials()
+
+    # ── Trading calendar gate ─────────────────────────────────────────────────
+    # A 0DTE bot must not run on a non-session day (its symbols won't exist),
+    # and on early-close days every close-anchored time must shift with the
+    # session — a 15:25 time stop after a 13:00 close means the position is
+    # held into expiry.
+    today = config.today_et()
+    if not market_calendar.covers(today):
+        raise SystemExit(
+            f"market_calendar tables do not cover {today.year}. "
+            f"Extend market_calendar.py before trading — refusing to guess "
+            f"holidays/early closes."
+        )
+    if not market_calendar.is_trading_day(today):
+        if os.environ.get("FORCE_RUN") == "1":
+            logger.warning(
+                "%s is not a trading day — running anyway (FORCE_RUN=1, dev only).",
+                today,
+            )
+        else:
+            logger.info("%s is not a trading day (weekend/holiday) — exiting.", today)
+            return
+    if market_calendar.near_horizon(today):
+        logger.warning(
+            "CALENDAR HORIZON: market_calendar tables end soon (%d) — extend "
+            "market_calendar.py now or the bot will refuse to start next year.",
+            today.year,
+        )
+    if market_calendar.is_early_close(today):
+        old_stop = config.TIME_STOP
+        config.ENTRY_END = market_calendar.shift_for_close(config.ENTRY_END, today)
+        config.TIME_STOP = market_calendar.shift_for_close(config.TIME_STOP, today)
+        _WATCHDOG_END    = market_calendar.shift_for_close(_WATCHDOG_END, today)
+        logger.warning(
+            "EARLY CLOSE day (13:00 ET session): entry_end=%s time_stop=%s (was %s)",
+            config.ENTRY_END, config.TIME_STOP, old_stop,
+        )
 
     _market_open_event = asyncio.Event()
     risk_manager.reset_day()
     _restore_daily_pnl()   # replay today's closed trades after a restart
 
-    stock_client = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_API_SECRET)
+    stock_client  = StockHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_API_SECRET)
+    option_client = OptionHistoricalDataClient(config.ALPACA_API_KEY, config.ALPACA_API_SECRET)
 
     # Daily ATR baseline
     logger.info("Fetching daily ATR baseline...")
-    _baseline_atr = startup_atr(stock_client)
+    _baseline_atr = strikes.startup_atr(stock_client)
     logger.info("Baseline ATR: %.2f", _baseline_atr)
+
+    # Prime the option-chain cache so dynamically built strikes are validated
+    # against contracts that actually exist (see strikes.prime_chain_cache).
+    logger.info("Priming option chain cache for %s...", today)
+    strikes.prime_chain_cache(option_client, today)
 
     # Pre-seed EMAs with last 30 RTH 1-min bars
     logger.info("Pre-seeding momentum engine...")
@@ -994,9 +1361,10 @@ async def main():
             feed              = DataFeed.IEX,
         )
         raw = stock_client.get_stock_bars(seed_req)[config.UNDERLYING]
-        rth_open  = datetime.time(9, 30)
-        rth_close = datetime.time(16, 0)
-        raw = [b for b in raw if rth_open <= b.timestamp.astimezone(config.ET).time() < rth_close]
+        raw = [b for b in raw
+               if market_calendar.ET_OPEN
+               <= b.timestamp.astimezone(config.ET).time()
+               < market_calendar.ET_REGULAR_CLOSE]
         raw = raw[-30:]
         seed_bars = [
             Bar(t=b.timestamp, open=float(b.open), high=float(b.high),
@@ -1026,16 +1394,24 @@ async def main():
         on_trade_update = on_trade_update,
     )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     _shutdown_event = asyncio.Event()
 
     async def _shutdown(reason: str = "signal"):
-        """Full shutdown — cancels orders and closes positions before exit."""
+        """Full shutdown — closes positions, then cancels orders, then exits.
+
+        Ordering matters: an in-flight exit's close order must NOT be
+        cancelled out from under it (that left the position open while the
+        exit_pending guard made the follow-up close a no-op), so we first
+        wait for in-flight operations, then close, and only cancel leftover
+        orders after our own exits are done."""
         if _shutdown_event.is_set():
             return
-        logger.info("Shutdown (%s). Cancelling open orders...", reason)
-        order_manager.cancel_all_options()
-        await _force_close_all()
+        logger.info("Shutdown (%s). Settling in-flight operations...", reason)
+        await _wait_for_pending_ops(20, "SHUTDOWN")
+        if bot_state.position is not None:
+            await _execute_exit("shutdown")
+        await order_manager.cancel_all_options_async()
         _shutdown_event.set()
         for task in asyncio.all_tasks(loop):
             if task is not asyncio.current_task():
@@ -1044,12 +1420,13 @@ async def main():
     async def _soft_shutdown(reason: str = "restart"):
         """
         Soft shutdown for restart — cancels unfilled orders but leaves open
-        positions on Alpaca. They will be recovered automatically on next startup.
+        positions on Alpaca. They will be recovered automatically on next
+        startup (full metadata via logs/position_state.json).
         """
         if _shutdown_event.is_set():
             return
         logger.info("Soft shutdown (%s). Leaving positions open for recovery.", reason)
-        order_manager.cancel_all_options()   # cancel any pending limit orders
+        await order_manager.cancel_all_options_async()   # cancel any pending limit orders
         _shutdown_event.set()
         for task in asyncio.all_tasks(loop):
             if task is not asyncio.current_task():
@@ -1076,7 +1453,9 @@ async def main():
                         logger.info("Keyboard quit requested.")
                         future = asyncio.run_coroutine_threadsafe(_shutdown("keyboard"), loop)
                         try:
-                            future.result(timeout=8)
+                            # _shutdown may wait up to 20s for an in-flight
+                            # exit plus close retries — give it room
+                            future.result(timeout=45)
                         except Exception:
                             # Event loop may be frozen — force exit regardless
                             logger.warning("Event loop unresponsive — forcing exit.")
@@ -1133,12 +1512,13 @@ async def main():
     )
 
     await asyncio.gather(
-        _guarded(_feed.start,                          "feed"),
-        _guarded(_option_subscriber,                   "option_subscriber"),
-        _guarded(_resubscribe_watcher,                 "resubscribe_watcher"),
-        _guarded(_exit_monitor,                        "exit_monitor"),
-        _guarded(_status_loop,                         "status_loop"),
-        _guarded(lambda: _time_stop_watcher(_feed),    "time_stop_watcher"),
+        _guarded(_feed.start,           "feed"),
+        _guarded(_option_subscriber,    "option_subscriber"),
+        _guarded(_resubscribe_watcher,  "resubscribe_watcher"),
+        _guarded(_exit_monitor,         "exit_monitor"),
+        _guarded(_staleness_watcher,    "staleness_watcher"),
+        _guarded(_status_loop,          "status_loop"),
+        _guarded(_time_stop_watcher,    "time_stop_watcher"),
         return_exceptions=True,
     )
 

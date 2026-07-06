@@ -26,13 +26,23 @@ class Quote:
     symbol:    str
     bid:       float
     ask:       float
-    timestamp: datetime.datetime
+    timestamp: datetime.datetime          # exchange timestamp
+    recv_monotonic: float = 0.0           # local receive time (time.monotonic) —
+                                          # drives the data-staleness kill switch;
+                                          # exchange clocks can't be trusted for age
 
     @property
     def mid(self) -> float:
         if self.bid > 0 and self.ask > 0:
             return (self.bid + self.ask) / 2.0
         return self.ask or self.bid
+
+    @property
+    def spread_pct(self) -> float:
+        """Bid/ask spread as a fraction of mid; inf when one-sided/crossed."""
+        if self.bid > 0 and self.ask > 0 and self.ask >= self.bid:
+            return (self.ask - self.bid) / ((self.ask + self.bid) / 2.0)
+        return float("inf")
 
 
 @dataclass
@@ -83,11 +93,6 @@ def _zone(spy_price: float, strike: float) -> str:
 def _in_entry_window() -> bool:
     now_et = datetime.datetime.now(tz=config.ET).strftime("%H:%M")
     return config.ENTRY_START <= now_et <= config.ENTRY_END
-
-
-def _past_time_stop() -> bool:
-    now_et = datetime.datetime.now(tz=config.ET).strftime("%H:%M")
-    return now_et >= config.TIME_STOP
 
 
 # ── Entry signal ──────────────────────────────────────────────────────────────
@@ -170,54 +175,9 @@ def check_entry(
     return True
 
 
-# ── Exit signals ──────────────────────────────────────────────────────────────
-
-@dataclass
-class ExitSignal:
-    should_exit:   bool   = False
-    reason:        str    = ""
-    partial_exit:  bool   = False   # True = close half, False = close all
-    qty_to_close:  int    = 0
-
-
-def check_exit(
-    *,
-    entry_price:   float,
-    current_mid:   float,
-    qty_held:      int,
-    target1_hit:   bool,
-    momentum:      MomentumState,
-    side:          str,
-) -> ExitSignal:
-    """
-    Evaluates all exit conditions and returns an ExitSignal.
-    Caller is responsible for tracking whether target1 has already been taken.
-    """
-    if _past_time_stop():
-        return ExitSignal(True, "time_stop", partial_exit=False, qty_to_close=qty_held)
-
-    # Hard stop
-    stop_price = entry_price * config.STOP_MULT
-    if current_mid <= stop_price:
-        return ExitSignal(True, "hard_stop", partial_exit=False, qty_to_close=qty_held)
-
-    # Momentum flip — exit all immediately
-    required_direction = "bull" if side == "call" else "bear"
-    if momentum.direction not in (required_direction, "neutral"):
-        return ExitSignal(True, "momentum_flip", partial_exit=False, qty_to_close=qty_held)
-
-    # Target 1 — take 50% off
-    if not target1_hit and current_mid >= entry_price * config.TARGET_1_MULT:
-        half = max(1, qty_held // 2)
-        return ExitSignal(True, "target_1", partial_exit=True, qty_to_close=half)
-
-    # Target 2 — exit remainder
-    if current_mid >= entry_price * config.TARGET_2_MULT:
-        return ExitSignal(True, "target_2", partial_exit=False, qty_to_close=qty_held)
-
-    # Breakeven trailing stop — if price has risen past 1.5× but then fallen back to entry
-    if current_mid >= entry_price * config.BREAKEVEN_MULT:
-        if current_mid <= entry_price:
-            return ExitSignal(True, "breakeven_trail", partial_exit=False, qty_to_close=qty_held)
-
-    return ExitSignal(False)
+# NOTE: the live exit logic (TP / hard stop / peak trail / SPY-level stop /
+# time stop) is implemented in main.py's _evaluate_exit / _evaluate_spy_stop
+# and executed through the centralized _execute_exit path. A previous
+# check_exit() prototype here referenced config keys that were never added
+# (TARGET_1_MULT etc.) and would have crashed if called — removed rather than
+# shipped as dead code.

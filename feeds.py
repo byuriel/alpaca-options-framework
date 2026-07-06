@@ -105,6 +105,10 @@ class FeedManager:
         self._stock_stream.subscribe_bars(self._handle_spy_bar, config.UNDERLYING)
         self._trading_stream.subscribe_trade_updates(self._handle_trade_update)
 
+        # NOTE: _run_forever() is alpaca-py private API — the public .run() is
+        # blocking-sync and unusable inside an existing event loop. This is why
+        # requirements.txt pins alpaca-py to a bounded range: a minor release
+        # can rename this without notice. Re-test before bumping the bound.
         t1 = asyncio.create_task(self._stock_stream._run_forever(),   name="stock_stream")
         t2 = asyncio.create_task(self._option_stream._run_forever(),  name="option_stream")
         t3 = asyncio.create_task(self._trading_stream._run_forever(), name="trading_stream")
