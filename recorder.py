@@ -59,7 +59,14 @@ class MarketDataRecorder:
         self._stop     = threading.Event()
         # Append mode: a same-day restart continues the same file, and the
         # extra "m" metadata line it writes doubles as a restart marker.
-        self._file     = gzip.open(path, "at", encoding="utf-8")
+        # CRASH-SAFE BY CONSTRUCTION: each flush batch is written as a
+        # complete, self-terminated gzip member (mtime=0). A long-lived gzip
+        # stream would be left unterminated by the bot's deliberate hard
+        # exits (os._exit / watchdog execl), and a restart appending after an
+        # unterminated member corrupts everything past the restart point —
+        # on exactly the disrupted sessions that matter most. Concatenated
+        # complete members are read natively by gzip.
+        self._raw      = open(path, "ab")
         self._thread   = threading.Thread(
             target=self._writer_loop, daemon=True, name="mdata-recorder")
         self._thread.start()
@@ -98,23 +105,32 @@ class MarketDataRecorder:
 
     # ── Writer thread ─────────────────────────────────────────────────────────
 
+    def _write_member(self, lines: list):
+        """One complete gzip member per flush batch — the file on disk is
+        valid after every flush, no close() ever required."""
+        import io
+        buf = io.BytesIO()
+        with gzip.GzipFile(filename="", mode="wb", fileobj=buf, mtime=0) as gz:
+            gz.write("".join(lines).encode())
+        self._raw.write(buf.getvalue())
+        self._raw.flush()
+
     def _writer_loop(self):
         last_flush   = time.monotonic()
         last_drop_no = 0
-        while not (self._stop.is_set() and self._q.empty()):
+        batch: list  = []
+        while not (self._stop.is_set() and self._q.empty() and not batch):
             try:
                 item = self._q.get(timeout=0.5)
+                batch.append(json.dumps(item, separators=(",", ":")) + "\n")
             except queue.Empty:
-                item = None
+                pass
             try:
-                if item is not None:
-                    self._file.write(json.dumps(item, separators=(",", ":")))
-                    self._file.write("\n")
                 now = time.monotonic()
-                if now - last_flush >= _FLUSH_INTERVAL:
-                    # gzip sync point — everything before this is readable
-                    # even if the process os._exit()s later
-                    self._file.flush()
+                if batch and (now - last_flush >= _FLUSH_INTERVAL
+                              or len(batch) >= 5000 or self._stop.is_set()):
+                    self._write_member(batch)
+                    batch = []
                     last_flush = now
                     if self._dropped > last_drop_no:
                         logger.warning(
@@ -124,18 +140,17 @@ class MarketDataRecorder:
                         last_drop_no = self._dropped
             except Exception as e:
                 logger.error("Recorder write failed: %s", e)
+                batch = []          # drop, never duplicate — see failure policy
                 time.sleep(1)
 
     def close(self):
         """Best-effort clean close (not guaranteed to run — see module doc)."""
+        if self._dropped:
+            self._put(["m", time.time(), {"dropped_events": self._dropped}])
         self._stop.set()
         self._thread.join(timeout=5)
         try:
-            if self._dropped:
-                self._file.write(json.dumps(
-                    ["m", time.time(), {"dropped_events": self._dropped}],
-                    separators=(",", ":")) + "\n")
-            self._file.close()
+            self._raw.close()
         except Exception:
             pass
 
@@ -148,6 +163,7 @@ def read_events(path: str) -> Iterator[list]:
       - a truncated gzip tail (os._exit before close) — yields what's intact
       - individual corrupt lines — skipped with a warning count
     """
+    import zlib   # zlib.error does NOT subclass OSError — must be in the net
     corrupt = 0
     try:
         with gzip.open(path, "rt", encoding="utf-8") as f:
@@ -159,7 +175,7 @@ def read_events(path: str) -> Iterator[list]:
                     yield json.loads(line)
                 except json.JSONDecodeError:
                     corrupt += 1
-    except (EOFError, OSError, gzip.BadGzipFile) as e:
+    except (EOFError, OSError, gzip.BadGzipFile, zlib.error) as e:
         # Truncated tail from a hard exit — everything already yielded is good
         logger.warning("Recording %s has a truncated tail (%s) — using intact prefix",
                        path, e)

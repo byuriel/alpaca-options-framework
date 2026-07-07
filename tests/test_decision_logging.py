@@ -128,6 +128,53 @@ class TestDecisionLoggerFiles:
         rows = list(dl.read_decisions(str(p)))
         assert len(rows) >= 3      # intact prefix survives
 
+    def test_hard_exit_then_restart_append_fully_readable(self, tmp_path):
+        # THE adversarial-review finding: the bot never calls close() on its
+        # deliberate hard exits (os._exit at time stop, watchdog execl). A
+        # long-lived gzip stream left unterminated + restart-append made
+        # everything after the restart unreadable (uncaught zlib.error).
+        # Complete-member-per-batch writing makes this impossible: NO close,
+        # then append, then read EVERYTHING.
+        lg1 = dl.DecisionLogger(str(tmp_path), "2026-07-06")
+        lg1.log_candidates("09:31:00", [self._row()])
+        lg1.log_candidates("09:32:00", [self._row()])
+        del lg1                                   # hard exit: no close()
+
+        lg2 = dl.DecisionLogger(str(tmp_path), "2026-07-06")   # watchdog restart
+        lg2.log_candidates("11:00:00", [self._row()])
+        del lg2                                   # dies hard again
+
+        rows = list(dl.read_decisions(str(tmp_path / "decisions_2026-07-06.csv.gz")))
+        assert [r["bar_time_et"] for r in rows] == ["09:31:00", "09:32:00", "11:00:00"]
+        # exactly one header, present even though NOTHING was ever closed
+        assert all(r["date"] == "2026-07-06" for r in rows)
+
+    def test_header_survives_restart_before_first_batch(self, tmp_path):
+        # Second finding: file created but header unflushed → restart saw a
+        # 0-byte file and never wrote a header. Header is now its own member,
+        # written synchronously at creation.
+        lg1 = dl.DecisionLogger(str(tmp_path), "2026-07-06")
+        del lg1                                   # dies before ANY batch
+        lg2 = dl.DecisionLogger(str(tmp_path), "2026-07-06")
+        lg2.log_candidates("09:31:00", [self._row()])
+        del lg2
+        rows = list(dl.read_decisions(str(tmp_path / "decisions_2026-07-06.csv.gz")))
+        assert len(rows) == 1 and rows[0]["bar_time_et"] == "09:31:00"
+
+    def test_failed_write_drops_batch_never_duplicates(self, tmp_path):
+        # Third finding: a failed flush used to retain the batch and re-emit
+        # it next bar — duplicated rows silently skew every drift rate.
+        # Policy: drop and COUNT. A lost bar is honest; a doubled one lies.
+        lg = dl.DecisionLogger(str(tmp_path), "2026-07-06")
+        lg._raw.close()                            # force writes to fail
+        lg.log_candidates("09:31:00", [self._row()])
+        assert lg.dropped_batches == 1
+        lg._raw = open(lg.decisions_path, "ab")    # disk "recovers"
+        lg.log_candidates("09:32:00", [self._row()])
+        lg.close()
+        rows = list(dl.read_decisions(str(tmp_path / "decisions_2026-07-06.csv.gz")))
+        assert [r["bar_time_et"] for r in rows] == ["09:32:00"]   # no resurrection
+
 
 class TestReplayRegeneratesDecisions:
     def test_replay_emits_decisions_attempts_and_excursions(self, tmp_path):

@@ -222,6 +222,31 @@ class TestEndToEnd:
 
 
 class TestRecorderRoundTrip:
+    def test_hard_exit_then_restart_append_fully_readable(self, tmp_path, monkeypatch):
+        # Same adversarial finding as the decision logger: a recording must
+        # survive [write → os._exit (no close) → restart-append → read ALL].
+        import recorder as rec_mod
+        monkeypatch.setattr(rec_mod, "_FLUSH_INTERVAL", 0.05)
+        path = str(tmp_path / "rec.jsonl.gz")
+
+        r1 = rec_mod.MarketDataRecorder(path)
+        r1.record_meta({"session_date": "2026-07-06"})
+        r1.record_quote("A", 0.48, 0.52, "")
+        import time as _t
+        _t.sleep(0.5)                              # writer flushes a member
+        # hard exit: NO close(); the daemon thread dies with the process
+        r1._stop.set(); r1._thread.join(timeout=2)
+
+        r2 = rec_mod.MarketDataRecorder(path)      # watchdog restart, append
+        r2.record_quote("B", 0.60, 0.64, "")
+        _t.sleep(0.5)
+        r2._stop.set(); r2._thread.join(timeout=2)
+
+        meta, events = recorder.load_session(path)
+        assert meta.get("session_date") == "2026-07-06"
+        syms = [e[2] for e in events if e[0] == "q"]
+        assert syms == ["A", "B"]                  # both halves readable
+
     def test_write_read_roundtrip(self, tmp_path):
         path = str(tmp_path / "rec.jsonl.gz")
         rec = recorder.MarketDataRecorder(path)

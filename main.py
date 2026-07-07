@@ -457,7 +457,17 @@ async def _evaluate_entry(symbol: str):
                 logger.error("Attempt logging failed: %s", e)
 
         try:
-            order = await order_manager.buy_limit(symbol, qty, limit_price)
+            try:
+                order = await order_manager.buy_limit(symbol, qty, limit_price)
+            except asyncio.CancelledError:
+                # Shutdown cancelled the fill-wait and no fill was adopted —
+                # but the order WAS submitted to the broker. The funnel
+                # record must show it ("every attempt, INCLUDING failures"),
+                # or reconciliation and fill-rate stats undercount exactly
+                # the disrupted executions. Attempts flush per row, so this
+                # lands before the process dies.
+                _log_attempt("cancelled")
+                raise
 
             if order is None:
                 logger.warning("Entry failed/timed out for %s — no fill adopted", symbol)

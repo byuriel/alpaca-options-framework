@@ -75,38 +75,69 @@ def _f(v, nd=4):
 
 
 class DecisionLogger:
-    """Per-session writer. Buffered in memory, flushed once per bar batch —
-    ~1 write/min, negligible even on the event loop."""
+    """Per-session writer — crash-safe BY CONSTRUCTION.
+
+    Every batch (one bar's candidates) is written as a COMPLETE, self-
+    terminated gzip member appended to the raw file. There is no long-lived
+    compressed stream to finalize, so the bot's deliberate hard exits
+    (os._exit at the time stop, watchdog execl) can never leave an
+    unterminated member that corrupts everything appended after a restart —
+    Python's gzip reader walks concatenated members natively. The header is
+    its own member, written synchronously AT CREATION, so no restart window
+    can produce a header-less file. Cost: ~20 bytes of member overhead per
+    bar. Worth it.
+
+    Failure policy: if a batch fails to write (disk full), it is DROPPED and
+    counted — a lost bar of rows is honest; silently re-emitting it next bar
+    would double-count and skew every rate drift_report computes."""
 
     def __init__(self, log_dir: str, date_str: str):
         os.makedirs(log_dir, exist_ok=True)
         self.decisions_path = os.path.join(log_dir, f"decisions_{date_str}.csv.gz")
         self.attempts_path  = os.path.join(log_dir, f"attempts_{date_str}.csv")
         self._date = date_str
+        self.dropped_batches = 0
 
-        new_decisions = not os.path.exists(self.decisions_path)
-        raw = open(self.decisions_path, "ab")
-        # mtime=0 → byte-deterministic output for identical inputs
-        self._gz  = gzip.GzipFile(filename="", mode="ab", fileobj=raw, mtime=0)
-        self._buf = io.StringIO()
-        self._csv = csv.writer(self._buf)
-        if new_decisions:
-            self._csv.writerow(DECISION_COLUMNS)
+        is_new    = (not os.path.exists(self.decisions_path)
+                     or os.path.getsize(self.decisions_path) == 0)
+        self._raw = open(self.decisions_path, "ab")
+        if is_new:
+            hdr = io.StringIO()
+            csv.writer(hdr).writerow(DECISION_COLUMNS)
+            self._write_member(hdr.getvalue())   # on disk before anything else
 
-        new_attempts = not os.path.exists(self.attempts_path)
+        new_attempts = (not os.path.exists(self.attempts_path)
+                        or os.path.getsize(self.attempts_path) == 0)
         self._att_f   = open(self.attempts_path, "a", newline="")
         self._att_csv = csv.writer(self._att_f)
         if new_attempts:
             self._att_csv.writerow(ATTEMPT_COLUMNS)
             self._att_f.flush()
 
+    def _write_member(self, text: str):
+        """Compress `text` as one complete gzip member (mtime=0 → byte-
+        deterministic) and append it with a single write+flush. On failure
+        the batch is dropped and counted — never retried (see class doc)."""
+        buf = io.BytesIO()
+        with gzip.GzipFile(filename="", mode="wb", fileobj=buf, mtime=0) as gz:
+            gz.write(text.encode())
+        try:
+            self._raw.write(buf.getvalue())
+            self._raw.flush()
+        except (OSError, ValueError) as e:   # ValueError: closed/broken handle
+            self.dropped_batches += 1
+            logger.error("Decision batch dropped (write failed: %s) — "
+                         "%d dropped so far", e, self.dropped_batches)
+
     # ── Decisions (one batch per bar) ─────────────────────────────────────────
 
     def log_candidates(self, bar_time_et: str, rows: List[dict]):
-        """rows: dicts from build_candidate_row(). Batched write + sync flush
-        so a hard exit loses at most the current bar."""
+        """One complete gzip member per bar batch — a hard exit at ANY moment
+        leaves a fully readable file."""
+        buf = io.StringIO()
+        w   = csv.writer(buf)
         for r in rows:
-            self._csv.writerow([
+            w.writerow([
                 SCHEMA_VERSION, self._date, bar_time_et,
                 r["symbol"], r["side"], _f(r["strike"], 2),
                 _f(r["spy"], 2), _f(r["zone_dist_pct"], 5),
@@ -120,15 +151,8 @@ class DecisionLogger:
                 int(r["in_position"]), int(r["entry_pending"]),
                 int(r["risk_ok"]), int(bool(r["blackout"])), int(r["event_day"]),
             ])
-        self._flush_decisions()
-
-    def _flush_decisions(self):
-        data = self._buf.getvalue()
-        if data:
-            self._gz.write(data.encode())
-            self._gz.flush()          # gzip sync point — readable up to here
-            self._buf.seek(0)
-            self._buf.truncate()
+        if rows:
+            self._write_member(buf.getvalue())
 
     # ── Attempts ──────────────────────────────────────────────────────────────
 
@@ -147,8 +171,7 @@ class DecisionLogger:
 
     def close(self):
         try:
-            self._flush_decisions()
-            self._gz.close()
+            self._raw.close()
             self._att_f.close()
         except Exception:
             pass
@@ -157,10 +180,13 @@ class DecisionLogger:
 # ── Readers (tolerant of hard-exit truncation, like recorder.py) ─────────────
 
 def read_decisions(path: str) -> Iterator[dict]:
+    # zlib.error is in the net: it does NOT subclass OSError, and a corrupt
+    # byte inside a member surfaces as zlib.error, not BadGzipFile.
+    import zlib
     try:
         with gzip.open(path, "rt", encoding="utf-8") as f:
             yield from csv.DictReader(f)
-    except (EOFError, OSError, gzip.BadGzipFile) as e:
+    except (EOFError, OSError, gzip.BadGzipFile, zlib.error) as e:
         logger.warning("Decision log %s truncated tail (%s) — using intact prefix",
                        path, e)
 

@@ -33,19 +33,18 @@ refuses to diagnose from noise.
 import argparse
 import bisect
 import csv
-import datetime
 import glob
 import json
 import math
 import os
 import random
 from collections import defaultdict
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import config
 import decision_logger as dl
 from signals import GATE_NAMES
-from trade_stats import _mean, _percentile, day_bootstrap
+from trade_stats import _mean, _percentile
 
 MIN_DAYS_PER_WINDOW = 5
 PSI_MODERATE, PSI_MAJOR = 0.10, 0.25
