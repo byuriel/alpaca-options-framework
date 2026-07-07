@@ -99,6 +99,10 @@ alpaca-options-framework/
 │
 ├── trade_stats.py  Statistics layer — cluster bootstrap CIs, exact t/Wilson
 │                     inference, verdict tiers, paired sweep comparison
+├── decision_logger.py  Per-candidate gate verdicts + attempt records — the
+│                     counterfactual funnel log (replay-regenerable)
+├── drift_report.py Baseline-vs-recent funnel diagnosis — PSI + bootstrap,
+│                     ranked findings with cause and prescribed action
 ├── reconcile.py    Nightly broker reconciliation — order-ID matching, gate
 │                     lock on unexplained discrepancies
 ├── feed_monitor.py Feed coverage & quality — dark symbols, quote gaps,
@@ -349,6 +353,47 @@ phone. Rate-limited (5-min per-message cooldown, 20/day cap with suppression
 counts), delivered off the event loop, flushed before every hard-exit path
 so the last alert escapes. A machine that flattens at 11:00 and says
 nothing until you read the terminal is not an unattended system.
+
+---
+
+## Decision Log & Drift Report — When the Strategy Deviates, Know WHY
+
+P&L only says *that* a strategy changed. Four different deaths print the
+same red number and need four different responses: signals stopped firing
+(regime moved), gates started blocking (a filter went stale), fills stopped
+happening (execution), or winners became losers (the edge repriced). The
+decision-logging stack localizes deviation to a layer of the funnel:
+
+```
+market conditions → signal gates → attempts/fills → realization → P&L
+```
+
+- **`decisions_YYYY-MM-DD.csv.gz`** — one row per (bar, candidate): EVERY
+  gate's verdict (never short-circuited — order-dependent gate stats are
+  lies), the **sole blocker** (the gate that alone stopped a near-miss —
+  the single most actionable statistic), and the full market/momentum
+  context. Written from the *same* gate function the live entry path calls,
+  so the record and the trading can never disagree.
+- **`attempts_YYYY-MM-DD.csv`** — every order attempt including failures;
+  fill-rate decay is an execution-regime change with its own fix.
+- **Trades CSV excursion columns** (`mfe_pnl`/`mae_pnl`/`peak_mid`) — the
+  fork in the diagnostic tree: MFE collapsed = edge decay (cut size,
+  redesign); MFE intact but capture down = give-back (exit sweeps fix it).
+- **Regenerable history**: replay drives the same code path, so decision
+  logs can be rebuilt for every session ever recorded — the drift baseline
+  exists on day one, byte-deterministically.
+
+```bash
+python drift_report.py logs/ --recent-days 10
+```
+
+compares a recent window against baseline with the same statistical
+discipline as `trade_stats` (PSI distribution-shift scores, by-day
+bootstrap, deterministic seed, an insufficient-data refusal) and emits
+**ranked findings with the most probable cause and the prescribed action**
+— e.g. "EDGE DECAY: median MFE ratio 0.30→0.03 — cut size per kill
+criteria; exit retuning will NOT fix this" vs "'atr' became the binding
+constraint — replay-sweep its threshold and quote the adjusted p."
 
 ---
 

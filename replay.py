@@ -136,6 +136,7 @@ async def _run(rec_path: str, out_dir: str) -> dict:
         main.orb_filter              = ORBFilter()
         main.order_manager           = broker
         main._recorder               = None
+        main._decision_logger        = None   # fresh per run; emits into out_dir
         main._market_open_event      = asyncio.Event()
         main._entry_lock             = asyncio.Lock()   # fresh, bound to THIS loop
         main._ghost_sweep_lock       = asyncio.Lock()
@@ -268,6 +269,12 @@ async def _run(rec_path: str, out_dir: str) -> dict:
         }
     finally:
         clock.install_live()
+        try:
+            if getattr(main, "_decision_logger", None):
+                main._decision_logger.close()
+        except Exception:
+            pass
+        main._decision_logger = None
         (config.LOG_DIR, config.ENTRY_END, config.TIME_STOP,
          state_mod.POSITION_STATE_FILE) = saved
 

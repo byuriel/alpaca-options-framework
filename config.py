@@ -219,6 +219,12 @@ CLIENT_ORDER_PREFIX = "aof"  # tags this bot's orders so cleanup only touches
 RECORD_MARKET_DATA = True
 RECORDINGS_DIR     = "recordings"
 
+# Structured decision log (decision_logger.py): one row per (bar, candidate)
+# with every gate's verdict — the counterfactual record that makes strategy-
+# drift diagnosis possible (drift_report.py reads it). Written from the
+# shared code path, so replay regenerates it for any recorded session.
+DECISION_LOG = True
+
 # ── Live web monitor ───────────────────────────────────────────────────────────
 # Read-only status page served from inside the bot (monitor.py). Binds
 # localhost only by default — a monitoring page on a trading process is not

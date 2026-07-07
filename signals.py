@@ -100,7 +100,60 @@ def _in_entry_window() -> bool:
 
 # ── Entry signal ──────────────────────────────────────────────────────────────
 
-def check_entry(
+# Fixed gate order — the decision log's schema and every diagnostic report
+# key off these names. Strategy gates first, execution-quality gates last.
+GATE_NAMES = (
+    "capacity",    # not already holding a position
+    "max_trades",  # daily trade-count cap
+    "window",      # inside the entry time window
+    "atr",         # minimum intrabar velocity (atr5)
+    "momentum",    # direction matches side
+    "price",       # premium inside [OPTION_MIN_PRICE, OPTION_MAX_PRICE]
+    "otm",         # SPY on the correct (OTM) side of the strike
+    "zone",        # inside the activation zone
+    "delta_min",   # proxy delta above floor
+    "delta_rising",  # proxy delta rising (when required)
+    "fresh",       # quote age within ENTRY_QUOTE_MAX_AGE_SEC (execution)
+    "spread",      # bid/ask spread within ENTRY_MAX_SPREAD_PCT (execution)
+)
+_EXECUTION_GATES = ("fresh", "spread")
+
+
+@dataclass
+class GateReport:
+    """
+    Verdict of EVERY entry gate for one candidate — no short-circuiting.
+
+    Why all gates always evaluate: diagnosis. If evaluation stopped at the
+    first failure, gate-failure statistics would be order-dependent lies —
+    "momentum failures rose" could really mean "everything degraded but
+    momentum is checked first". The trade decision is still the AND of all
+    gates (identical semantics); only the *information* is richer.
+    """
+    gates: dict                      # name -> bool (True = pass)
+    zone:  str = ""
+    mid:   float = 0.0
+
+    @property
+    def strategy_pass(self) -> bool:
+        """All strategy gates pass (execution-quality gates excluded) —
+        this is the historical check_entry() semantics."""
+        return all(v for k, v in self.gates.items() if k not in _EXECUTION_GATES)
+
+    @property
+    def all_pass(self) -> bool:
+        return all(self.gates.values())
+
+    @property
+    def sole_blocker(self) -> str:
+        """The single most actionable diagnostic: if EXACTLY one gate failed,
+        it alone stood between this candidate and a trade. A gate whose
+        sole-blocker rate shifts is the binding constraint that changed."""
+        failed = [k for k, v in self.gates.items() if not v]
+        return failed[0] if len(failed) == 1 else ""
+
+
+def evaluate_entry_gates(
     *,
     side:          str,             # "call" or "put"
     strike:        float,
@@ -111,71 +164,45 @@ def check_entry(
     trades_today:  int,
     has_open_pos:  bool,
     atr5:          float = 0.0,     # 5-bar ATR at entry bar — used for ATR gate
-) -> bool:
+    quote_age_s:   Optional[float] = None,   # None → freshness unknown, passes
+) -> GateReport:
     """
-    Returns True when all entry conditions are satisfied.
+    Evaluate ALL entry gates (strategy + execution-quality) for one
+    candidate. Pure — no logging, no side effects; the same function serves
+    the live entry path, the per-bar decision logger, and replay.
     """
-    sym = option_quote.symbol
-
-    if has_open_pos:
-        return False
-    if trades_today >= config.MAX_TRADES_PER_DAY:
-        return False
-    if not _in_entry_window():
-        return False
-
-    # ATR gate — requires minimum intrabar velocity to support a gamma move
-    if atr5 < config.ATR5_MIN_ENTRY:
-        logger.debug("SKIP %s | atr5=%.3f below min=%.3f", sym, atr5, config.ATR5_MIN_ENTRY)
-        return False
-
-    # Momentum must match the direction of the trade
-    required_direction = "bull" if side == "call" else "bear"
-    if momentum.direction != required_direction:
-        logger.debug("SKIP %s | momentum=%s need=%s", sym, momentum.direction, required_direction)
-        return False
-
-    # Option price within affordable range
     price = option_quote.mid
-    if price < config.OPTION_MIN_PRICE or price > config.OPTION_MAX_PRICE:
-        logger.debug("SKIP %s | price=%.2f outside [%.2f, %.2f]",
-                     sym, price, config.OPTION_MIN_PRICE, config.OPTION_MAX_PRICE)
-        return False
+    zone  = _zone(spy_price, strike)
+    required_direction = "bull" if side == "call" else "bear"
 
-    # Directionality: option must be OTM and SPY approaching from the correct side.
-    # A call entered when SPY >= strike is already ITM — the gamma explosion has passed.
-    # A put entered when SPY <= strike is already ITM — same problem.
-    if side == "call" and spy_price >= strike:
-        logger.debug("SKIP %s | call ITM: spy=%.2f >= strike=%.2f", sym, spy_price, strike)
-        return False
-    if side == "put" and spy_price <= strike:
-        logger.debug("SKIP %s | put ITM: spy=%.2f <= strike=%.2f", sym, spy_price, strike)
-        return False
+    gates = {
+        "capacity":   not has_open_pos,
+        "max_trades": trades_today < config.MAX_TRADES_PER_DAY,
+        "window":     _in_entry_window(),
+        "atr":        atr5 >= config.ATR5_MIN_ENTRY,
+        "momentum":   momentum.direction == required_direction,
+        "price":      config.OPTION_MIN_PRICE <= price <= config.OPTION_MAX_PRICE,
+        "otm":        (spy_price < strike) if side == "call" else (spy_price > strike),
+        "zone":       zone == "activation",
+        "delta_min":  proxy_tracker.proxy_delta >= config.PROXY_DELTA_MIN,
+        "delta_rising": (proxy_tracker.delta_rising
+                         if config.REQUIRE_DELTA_RISING else True),
+        # Execution-quality gates (previously inline in main._evaluate_entry —
+        # one source of truth now):
+        "fresh":      not (quote_age_s is not None
+                           and quote_age_s > config.ENTRY_QUOTE_MAX_AGE_SEC),
+        "spread":     option_quote.spread_pct <= config.ENTRY_MAX_SPREAD_PCT,
+    }
+    return GateReport(gates=gates, zone=zone, mid=price)
 
-    # Must be in activation zone only — approach zone entries reverse too often
-    zone = _zone(spy_price, strike)
-    if zone != "activation":
-        logger.debug("SKIP %s | zone=%s spy=%.2f strike=%.2f", sym, zone, spy_price, strike)
-        return False
 
-    # Proxy delta must be above minimum
-    if proxy_tracker.proxy_delta < config.PROXY_DELTA_MIN:
-        logger.debug("SKIP %s | proxy_delta=%.3f < min=%.3f",
-                     sym, proxy_tracker.proxy_delta, config.PROXY_DELTA_MIN)
-        return False
-
-    # Optionally require delta is rising (relaxed in data-collection mode)
-    if config.REQUIRE_DELTA_RISING and not proxy_tracker.delta_rising:
-        logger.debug("SKIP %s | delta not rising (%.3f)", sym, proxy_tracker.proxy_delta)
-        return False
-
-    logger.info(
-        "ENTRY signal: side=%s strike=%.2f spy=%.2f zone=%s "
-        "proxy_delta=%.3f option_mid=%.2f momentum=%s",
-        side, strike, spy_price, zone,
-        proxy_tracker.proxy_delta, price, momentum.direction,
-    )
-    return True
+def check_entry(**kwargs) -> bool:
+    """
+    Historical boolean interface — all STRATEGY conditions satisfied.
+    (Execution-quality gates are applied by the entry path via the full
+    GateReport.) Kept as the stable strategy-swap interface.
+    """
+    return evaluate_entry_gates(**kwargs).strategy_pass
 
 
 # NOTE: the live exit logic (TP / hard stop / peak trail / SPY-level stop /

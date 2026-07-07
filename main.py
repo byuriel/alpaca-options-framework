@@ -76,7 +76,8 @@ from occ import parse_occ_expiry, parse_occ_symbol
 from orders import OrderManager
 from risk import RiskManager
 from orb_filter import ORBFilter
-from signals import check_entry
+import decision_logger as decision_logger_mod
+from signals import evaluate_entry_gates
 from state import BotState, Position
 
 os.makedirs(config.LOG_DIR, exist_ok=True)
@@ -111,6 +112,7 @@ _recorder = None   # MarketDataRecorder — created in main() when enabled;
 _blackout_announced = False   # event-blackout WARNING logged once, not per tick
 _events_today: list = []      # scheduled macro events — set in main(), read by monitor
 _trades_cache = {"key": None, "rows": []}   # (mtime,size)-keyed CSV cache for monitor
+_decision_logger = None       # DecisionLogger — lazy; False = failed, don't retry
 
 # ── Watchdog heartbeat ────────────────────────────────────────────────────────
 # Updated by _status_loop every iteration. Watchdog thread checks every 10s;
@@ -230,6 +232,13 @@ async def on_spy_bar(bar):
         risk_manager.daily_pnl,
     )
 
+    # Decision log — every candidate's full gate verdict, once per bar.
+    # Synchronous by design (one small gzip write per minute) and fully
+    # exception-guarded inside; runs in replay too, so decision history is
+    # regenerable from any recorded session.
+    if _market_open_event.is_set():
+        _log_bar_decisions(b)
+
 
 # ── Trade update handler (order event stream) ─────────────────────────────────
 
@@ -282,6 +291,79 @@ async def on_option_quote(quote):
         asyncio.create_task(_evaluate_entry(sym))
 
 
+# ── Decision logging (the funnel's layers 1–2) ────────────────────────────────
+
+def _get_decision_logger():
+    """Lazy per-session DecisionLogger. False sentinel prevents a failing
+    disk from being retried every bar."""
+    global _decision_logger
+    if not config.DECISION_LOG or _decision_logger is False:
+        return None
+    if _decision_logger is None:
+        try:
+            _decision_logger = decision_logger_mod.DecisionLogger(
+                config.LOG_DIR, config.today_et().isoformat())
+        except Exception as e:
+            logger.error("Decision logger init failed (%s) — decision logging off.", e)
+            _decision_logger = False
+            return None
+    return _decision_logger
+
+
+def _log_bar_decisions(b):
+    """
+    Once per bar: evaluate EVERY candidate in the routing table through the
+    same gate function the live entry path uses, and log the full verdict
+    vector. This is the counterfactual record — what the bot saw and
+    considered — that makes strategy-drift diagnosis possible. Wrapped so a
+    logging defect can never touch the trading path.
+    """
+    dlog = _get_decision_logger()
+    if dlog is None or not _current_subscriptions:
+        return
+    try:
+        m         = momentum_engine.state
+        pos       = bot_state.position
+        blackout  = event_calendar.entry_blackout_reason(clock.now_et())
+        risk_ok   = risk_manager.can_trade()
+        event_day = bool(_events_today)
+        spy       = bot_state.spy_price
+        rows = []
+        for sym, (side, strike) in list(_current_subscriptions.items()):
+            quote = bot_state.get_quote(sym)
+            if quote is None:
+                continue   # never-quoted symbol — feed_monitor's domain
+            age = (clock.monotonic() - quote.recv_monotonic
+                   if quote.recv_monotonic > 0 else None)
+            report = evaluate_entry_gates(
+                side=side, strike=strike, option_quote=quote, momentum=m,
+                proxy_tracker=bot_state.get_tracker(sym), spy_price=spy,
+                trades_today=risk_manager.trades_today,
+                has_open_pos=pos is not None, atr5=m.atr5, quote_age_s=age,
+            )
+            rows.append({
+                "symbol": sym, "side": side, "strike": strike, "spy": spy,
+                "zone_dist_pct": abs(strike - spy) / spy if spy else None,
+                "bid": quote.bid, "ask": quote.ask, "mid": report.mid,
+                "spread_pct": (quote.spread_pct
+                               if quote.spread_pct != float("inf") else None),
+                "quote_age_s": age, "direction": m.direction,
+                "ema5": m.ema5, "ema20": m.ema20, "vwap": m.vwap,
+                "roc5": m.roc5, "atr5": m.atr5,
+                "consec": m.consec_green or -m.consec_red,
+                "gates": report.gates, "strategy_pass": report.strategy_pass,
+                "all_pass": report.all_pass, "sole_blocker": report.sole_blocker,
+                "in_position": pos is not None,
+                "entry_pending": bot_state.entry_pending,
+                "risk_ok": risk_ok, "blackout": blackout, "event_day": event_day,
+            })
+        if rows:
+            dlog.log_candidates(
+                b.t.astimezone(config.ET).strftime("%H:%M:%S"), rows)
+    except Exception as e:
+        logger.error("Decision logging failed: %s", e)
+
+
 # ── Entry evaluation ──────────────────────────────────────────────────────────
 
 async def _evaluate_entry(symbol: str):
@@ -310,25 +392,13 @@ async def _evaluate_entry(symbol: str):
         if quote is None:
             return
 
-        # Freshness gate: a queued entry task (e.g. behind another entry's
-        # 30s fill wait) must not size a trade off a quote from before the
-        # wait — the market has moved and the signal never saw this price.
-        if (quote.recv_monotonic > 0
-                and clock.monotonic() - quote.recv_monotonic > config.ENTRY_QUOTE_MAX_AGE_SEC):
-            logger.debug("SKIP %s | quote stale (%.1fs old)", symbol,
-                         clock.monotonic() - quote.recv_monotonic)
-            return
-
-        # Entry-side quote quality gate: a mid computed inside a wide (or
-        # one-sided) spread is not a price — don't size a trade off it.
-        if quote.spread_pct > config.ENTRY_MAX_SPREAD_PCT:
-            logger.debug(
-                "SKIP %s | entry spread %.1f%% > %.1f%%",
-                symbol, quote.spread_pct * 100, config.ENTRY_MAX_SPREAD_PCT * 100,
-            )
-            return
-
-        should_enter = check_entry(
+        # ONE gate evaluation — the same function the decision logger runs
+        # per bar, so the live path and the diagnostic record can never
+        # disagree about what the gates said. all_pass = strategy gates AND
+        # execution-quality gates (freshness, spread).
+        quote_age = (clock.monotonic() - quote.recv_monotonic
+                     if quote.recv_monotonic > 0 else None)
+        report = evaluate_entry_gates(
             side          = side,
             strike        = strike,
             option_quote  = quote,
@@ -338,9 +408,16 @@ async def _evaluate_entry(symbol: str):
             trades_today  = risk_manager.trades_today,
             has_open_pos  = False,
             atr5          = momentum_engine.state.atr5,
+            quote_age_s   = quote_age,
         )
-        if not should_enter:
+        if not report.all_pass:
             return
+
+        logger.info(
+            "ENTRY signal: side=%s strike=%.2f spy=%.2f zone=%s mid=%.2f momentum=%s",
+            side, strike, bot_state.spy_price, report.zone, report.mid,
+            momentum_engine.state.direction,
+        )
 
         # ORB shadow filter — logs BLOCK/ALLOW without preventing the trade
         orb_filter.check_shadow(side, symbol)
@@ -358,16 +435,39 @@ async def _evaluate_entry(symbol: str):
         # while it is set, so a fill that lands on Alpaca moments before
         # open_position() cannot be mistaken for a ghost and force-closed.
         bot_state.entry_pending = True
+        attempt_t0 = clock.monotonic()
+
+        def _log_attempt(outcome, fill_px=None, filled_qty=0, order_id=""):
+            """Layer-3 funnel record: every order attempt, INCLUDING failures.
+            Fill-rate decay is an execution-regime change with its own fix —
+            it must be data, not a log line."""
+            dlog = _get_decision_logger()
+            if dlog is None:
+                return
+            try:
+                dlog.log_attempt(
+                    time_et=clock.now_et().strftime("%H:%M:%S"),
+                    symbol=symbol, side=side, qty_requested=qty,
+                    decision_bid=quote.bid, decision_ask=quote.ask,
+                    decision_mid=entry_mid, limit_px=limit_price,
+                    outcome=outcome, fill_px=fill_px, filled_qty=filled_qty,
+                    wait_s=clock.monotonic() - attempt_t0, order_id=order_id,
+                )
+            except Exception as e:
+                logger.error("Attempt logging failed: %s", e)
+
         try:
             order = await order_manager.buy_limit(symbol, qty, limit_price)
 
             if order is None:
                 logger.warning("Entry failed/timed out for %s — no fill adopted", symbol)
+                _log_attempt("unfilled")
                 return
 
             fill_price = order_manager.get_fill_price(order)
             filled_qty = order_manager.get_filled_qty(order)
             if fill_price is None or filled_qty <= 0:
+                _log_attempt("error", order_id=str(order.id))
                 # A fill without a usable price cannot be tracked coherently.
                 # Loud log; if contracts actually exist the ghost sweeper
                 # reaps them on the next bar once entry_pending clears.
@@ -382,6 +482,9 @@ async def _evaluate_entry(symbol: str):
                     "PARTIAL entry fill: %d/%d contracts — adopting filled portion",
                     filled_qty, qty,
                 )
+            _log_attempt("partial" if filled_qty < qty else "filled",
+                         fill_px=fill_price, filled_qty=filled_qty,
+                         order_id=str(order.id))
 
             pos = Position(
                 symbol           = symbol,

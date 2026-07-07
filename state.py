@@ -39,6 +39,11 @@ CSV_COLUMNS = [
     "fees", "entry_order_id", "exit_order_id",
     "entry_bid", "entry_ask", "exit_bid", "exit_ask",
     "entry_slippage", "exit_slippage", "entry_spy",
+    # excursions — the fork in the diagnostic tree. mfe (max favorable) vs
+    # realized P&L distinguishes "trades stopped reaching profitable levels"
+    # (edge decay — stop and redesign) from "still reaching them but giving
+    # it back" (exit tuning — replay sweeps fix it). Dollars, per position.
+    "mfe_pnl", "mae_pnl", "peak_mid",
 ]
 
 
@@ -266,4 +271,7 @@ class BotState:
                 f"{(pos.entry_price - entry_mid):.4f}" if entry_mid else "",
                 f"{(exit_price - exit_mid):.4f}" if exit_mid else "",
                 pos.entry_spy_price,
+                f"{pos.max_unreal_pnl:.2f}",
+                f"{pos.min_unreal_pnl:.2f}",
+                f"{pos.peak_mid:.4f}",
             ])
