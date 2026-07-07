@@ -1813,21 +1813,44 @@ async def main():
             if task is not asyncio.current_task():
                 task.cancel()
 
-    def _signal_shutdown():
+    def _signal_shutdown(*_):
         async def _do():
             await _shutdown("Ctrl+C / SIGTERM")
             alerts.flush(1.0)
             os._exit(0)
-        asyncio.create_task(_do())
+        # run_coroutine_threadsafe is safe from both an in-loop callback
+        # (add_signal_handler) and a real OS signal handler thread (Windows
+        # signal.signal fallback) — as long as we don't block on .result().
+        try:
+            asyncio.run_coroutine_threadsafe(_do(), loop)
+        except Exception:
+            os._exit(0)
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _signal_shutdown)
+    # add_signal_handler is not implemented on the Windows ProactorEventLoop
+    # (it raises NotImplementedError) — so main() would crash at startup on
+    # Windows without this fallback to signal.signal for Ctrl+C.
+    _signals_installed = False
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, _signal_shutdown)
+        _signals_installed = True
+    except (NotImplementedError, RuntimeError):
+        pass
+    if not _signals_installed:
+        try:
+            signal.signal(signal.SIGINT, _signal_shutdown)   # Windows: Ctrl+C
+            logger.info("Signal handling via signal.signal (Windows fallback).")
+        except Exception:
+            logger.info("OS signal handlers unavailable — rely on time stop / "
+                        "supervisor to end the session.")
 
     def _keyboard_watcher():
         print("  >> Bot running.  q = quit  |  r = restart (keeps positions)  |  t = trades")
         while not _shutdown_event.is_set():
             try:
-                # Poll stdin with 1s timeout — never blocks indefinitely
+                # Poll stdin with 1s timeout — never blocks indefinitely.
+                # (select on stdin is POSIX-only; the TTY guard below keeps
+                # this thread off Windows and off any non-interactive launch.)
                 ready, _, _ = select.select([sys.stdin], [], [], 1.0)
                 if ready:
                     line = sys.stdin.readline().strip().lower()
@@ -1859,7 +1882,18 @@ async def main():
             except Exception:
                 break
 
-    threading.Thread(target=_keyboard_watcher, daemon=True).start()
+    # Interactive controls only when there's a real terminal AND select works
+    # on stdin (POSIX). Unattended launches (Task Scheduler, systemd, nohup,
+    # pythonw) have no tty → the thread would busy-loop on EOF or error on
+    # Windows; disable it cleanly and rely on the web monitor + alerts.
+    _interactive = (sys.stdin is not None and sys.stdin.isatty()
+                    and hasattr(select, "select") and os.name == "posix")
+    if _interactive:
+        threading.Thread(target=_keyboard_watcher, daemon=True).start()
+    else:
+        logger.info("Unattended mode — keyboard controls disabled. "
+                    "Monitor at http://%s:%s ; end via time stop / supervisor.",
+                    config.MONITOR_HOST, config.MONITOR_PORT)
 
     # ── Watchdog thread ───────────────────────────────────────────────────────
     def _watchdog():
@@ -1890,6 +1924,11 @@ async def main():
                 alerts.flush(2.0)
                 restart_guard.record_restart()   # storm brake counts these
                 _time.sleep(1)   # let the log flush
+                if config.SUPERVISED:
+                    # Supervisor owns the relaunch — exit with the agreed
+                    # code. os.execl under a waiting parent changes the PID
+                    # on Windows and orphans the replacement.
+                    os._exit(config.SUPERVISED_RESTART_CODE)
                 os.execl(sys.executable, sys.executable, *sys.argv)
 
     # ── Live web monitor (read-only, localhost by default) ───────────────────

@@ -105,6 +105,8 @@ alpaca-options-framework/
 │                     spread stats, held-symbol staleness analysis
 ├── alerts.py       Critical-event alerting — webhook/email on kill switches,
 │                     exit failures, reconciliation mismatches
+├── run_session.py  Daily supervisor — ET gate, runs the bot + auto reconcile/monitor
+├── windows/        Task Scheduler install/uninstall (hands-off Windows) — see WINDOWS.md
 ├── monitor.py      Live web monitor — read-only browser status page (localhost)
 ├── orb_filter.py   Clock-hour ORB directional regime filter (shadow mode)
 ├── kpi_dashboard.py  Self-contained HTML KPI report generator (see below)

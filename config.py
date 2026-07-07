@@ -174,6 +174,14 @@ CAT_STOP_MULT      = 0.20   # catastrophic backstop: if the executable BID is at
 RESTART_STORM_MAX        = 3     # watchdog restarts within the window → halt
 RESTART_STORM_WINDOW_SEC = 3600
 
+# When launched under the supervisor (run_session.py sets AOF_SUPERVISED=1),
+# the watchdog restarts the session by EXITING with this code and letting the
+# supervisor relaunch — rather than os.execl'ing itself in place. os.execl
+# under a waiting parent process changes the PID on Windows and orphans the
+# new process; the supervisor owning the relaunch is correct and cross-platform.
+SUPERVISED               = os.environ.get("AOF_SUPERVISED") == "1"
+SUPERVISED_RESTART_CODE  = 42
+
 # ── Peak trailing stop ─────────────────────────────────────────────────────────
 # Arms once the option gains PEAK_TRAIL_ACTIVATE above entry.
 # From that point, trails at PEAK_TRAIL_PCT × the highest mid seen.
