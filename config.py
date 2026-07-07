@@ -234,3 +234,70 @@ MONITOR_PORT = int(os.environ.get("MONITOR_PORT", "8080") or 0)
 
 # ── Polling ────────────────────────────────────────────────────────────────────
 SNAPSHOT_POLL_SEC  = 30    # how often to poll REST snapshot for proxy-delta calc
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ES FUTURES PORT (NinjaTrader sibling strategy — see ES_PORT_PLAN.md)
+# The signal engine is shared; everything below re-derives the option-specific
+# machinery (sizing, exits, account rules) in futures/price space.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Instrument ─────────────────────────────────────────────────────────────────
+ES_SPEC_ROOT = "MES"        # start on micros: 10× sizing granularity while the
+                            # sibling strategy is unvalidated (plan §4)
+
+# ── Signal re-basing ───────────────────────────────────────────────────────────
+# ATR5_MIN_ENTRY is 0.20 absolute SPY points (~3.2bp at SPY 627). ES trades at
+# ~10× SPY's level, so the velocity gate is re-specified as a FRACTION of price
+# — same economic threshold, instrument-independent. Sweep on replay before
+# trusting the exact value.
+ES_ATR5_MIN_FRAC = 0.00032
+
+# Zone translation variant (plan §2.3, corrected):  "off" = momentum-only
+# (default — the subscription-window analysis showed the zone machinery mostly
+# selects WHICH contract, not WHETHER to trade);  "grid" = geometric replication
+# of the SPY strike grid ×10 (parity control for the divergence report).
+ES_ZONE_VARIANT = "off"
+ES_GRID_STEP          = 5.00    # $0.50 SPY strike step × 10
+ES_GRID_MAX_OFFSET    = 45.0    # MAX_STRIKE_OFFSET 4.50 × 10
+ES_GRID_ALTS          = 6       # subscription window ± steps (STRIKE_ALTS)
+
+# ── Exit stack (price space — plan §3; provisional k's, MUST be swept) ─────────
+ES_STOP_ATR_MULT      = 0.75    # primary stop (ports directly from SPY_STOP_ATR_MULT)
+ES_STOP_FLOOR_PTS     = 1.00    # SPY_STOP_FLOOR 0.10 × 10
+ES_TARGET_ATR_MULT    = 1.50    # provisional; re-derive from recorded options MFEs
+ES_TRAIL_ARM_ATR_MULT = 1.00    # trail arms after this favorable excursion
+ES_TRAIL_GIVEBACK     = 0.40    # exit when retrace ≥ 40% of peak excursion
+                                # (Apex real-time trailing DD punishes give-back —
+                                # unrealized peaks consume headroom permanently)
+ES_STAGNATION_BARS     = 20     # theta replacement: flat tape has no carry cost
+ES_STAGNATION_ATR_FRAC = 0.25   # ... exit if peak excursion < this × atr5 by then
+
+# ── Execution model (backtest/sim; pin to broker fills when live) ──────────────
+ES_ENTRY_SLIP_TICKS = 1         # marketable entry: adverse ticks beyond bar close
+ES_STOP_SLIP_TICKS  = 1         # stop fills through the stop price
+ES_COMMISSION_PER_SIDE = {"ES": 3.20, "MES": 1.30}   # all-in $/side/contract —
+                                # PROVISIONAL; pin to the actual Apex/Rithmic
+                                # schedule and sweep 0–4 tick slip (plan §8)
+
+# ── Apex Trader Funding 50K account model (verified July 2026) ─────────────────
+# Trailing threshold trails IN REAL TIME on unrealized equity peaks and locks
+# once it reaches start + $100. Half contracts until EOD balance reaches
+# start + drawdown + $100 ($52,600). Consistency: highest day ≤ 50% of total
+# profit at payout (soft — delays payout, does not breach). Flat by 16:59 ET
+# (our 15:25 time stop is well inside). Since March 2026 every order must
+# carry an attached stop — the ATM bracket satisfies this.
+APEX_START_BALANCE   = 50_000.0
+APEX_TRAILING_DD     = 2_500.0
+APEX_LOCK_BUFFER     = 100.0
+APEX_MAX_MINIS       = 10       # 50K plan cap (micros = 10× this)
+APEX_HALF_UNTIL_NET  = True     # contract scaling rule
+APEX_CONSISTENCY_PCT = 0.50
+
+# Sizing/risk derived from the DRAWDOWN BUFFER, not the nominal 50K: the
+# tradeable capital is the $2,500 between balance and threshold.
+APEX_RISK_PER_TRADE     = 125.0   # ≤5% of a fresh buffer (was $150 on options)
+APEX_RISK_HEADROOM_FRAC = 0.05    # ... and never more than 5% of CURRENT headroom
+APEX_DAILY_LOSS_CAP     = 300.0   # familiar cap, AND ≤10% of headroom below
+APEX_DAILY_LOSS_FRAC    = 0.10
+APEX_WEEKLY_LOSS_CAP    = 900.0
+APEX_WEEKLY_LOSS_FRAC   = 0.30

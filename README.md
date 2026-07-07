@@ -526,6 +526,25 @@ against live-captured ground truth.
 
 ---
 
+## ES Futures Port — NinjaTrader Sibling Strategy
+
+The signal engine also drives an ES/MES futures sibling for a funded prop
+account (Apex 50K). See [`ES_PORT_PLAN.md`](./ES_PORT_PLAN.md) for the full
+decomposition (what ports, what can't — convexity, theta-as-stop, premium
+exits) and [`ninjatrader/`](./ninjatrader/) for the C# side.
+
+Key facts: the exits are re-derived in price space (`futures_exits.py`),
+sizing is re-derived from the Apex trailing-drawdown buffer, not the
+nominal balance (`apex_risk.py`), the backtest/golden-vector runner is
+`es_backtest.py`, and the C# NinjaScript engine is gated by machine-checked
+conformance against the Python oracle (`golden_vectors.py` +
+`ninjatrader/check_conformance.ps1`) — it may not trade until the diff
+prints `CONFORMANT`. Because Apex prohibits fully automated trading on
+funded accounts, the NT8 deliverable is a **co-pilot indicator** (signals,
+sizing, alerts; manual entry via ATM bracket), not an auto-trading strategy.
+
+---
+
 ## WebSocket vs REST — Why Both
 
 A common question: why use WebSocket streaming for quotes instead of REST polling?

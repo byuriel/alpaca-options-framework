@@ -1,9 +1,10 @@
-# ES Futures Port — Decomposition & Implementation Plan (PRE-BUILD, awaiting sign-off)
+# ES Futures Port — Decomposition & Implementation Plan
 
-*Status: analysis only. No code has been written. Per working style: this
-document inventories every layer-(B) dependency, states the portability
-verdict per component, designs the parity harness, and ends with the
-questions that must be answered before building.*
+*Status: SIGN-OFF RECEIVED (sibling-strategy basis, Q8 = yes). Phase 1 is
+built and conformance-verified — see §11 for the resolved decisions, the
+Apex compliance pivot, and what exists now. §§0–10 below are the original
+pre-build analysis, kept verbatim as the record; where later evidence
+corrected it, §11 says so explicitly.*
 
 ---
 
@@ -276,3 +277,134 @@ the same shared code.
 8. **Sign-off on the §0 verdict:** you are commissioning a sibling
    strategy with a shared signal engine and re-derived risk/exits — not a
    payoff-identical clone. Proceed on that basis?
+
+---
+
+## 11. POST-SIGN-OFF ADDENDUM (July 2026) — resolved decisions, corrections, build record
+
+### 11.1 The Apex constraint that reshapes the deliverable
+
+Q1 answer: **Apex Trader Funding, 50K account.** Rules verified against
+Apex's published material (July 2026):
+
+| rule | value | consequence here |
+|---|---|---|
+| Trailing threshold | $2,500, trails **in real time on unrealized equity peaks**, locks at start+$100 ($50,100) | Tradeable capital = headroom, not balance. Sizing re-derived (§11.3). An open winner that spikes and retraces **permanently consumes headroom** — `apex_risk.py` meters this (`unrealized_consumption`) so the exit sweep can price trail looseness. |
+| Contract scaling | Half size until EOD balance ≥ $52,600 (50K: 50 micros → 100) | Encoded in `ApexAccount.contracts_cap`. |
+| Consistency | Best day ≤ **50%** of total profit at payout (relaxed from 30%, Mar 2026). Soft — delays payout, no breach. | `consistency_ok` + soft daily cap helper. |
+| Mandatory stop | Since Mar 2026 every order must carry an attached stop (broker-side reject) | ATM bracket satisfies it; sizing REQUIRES a stop distance by construction. |
+| **Automation** | **Fully automated trading PROHIBITED on PA/Live** (bots, algos, AI, set-and-forget → closure + forfeiture). Semi-automated management of an existing position after manual entry is permitted. | **The deliverable pivots from auto-trading strategy to CO-PILOT INDICATOR** (§11.4). |
+| Flat by 16:59 ET | — | 15:25 time stop is well inside. |
+
+The automation rule is the big one: the original "port the bot to NT and
+let it trade" is not executable on an Apex PA without risking forfeiture.
+What ships instead is compliant by construction: the machine computes
+(identical conformance-checked engine), the human enters, the ATM bracket
+manages, the indicator alerts the soft exits. It never places an order.
+
+### 11.2 Correction to §0.3 / §2.3 — what the zone actually does
+
+Reading the live candidate loop closed the question: strikes recompute
+EVERY bar from spot (`compute_dynamic_strikes`), the bot subscribes a
+±6-strike window around the target, and entry fires on whichever
+subscribed candidate ticks first with all gates green. Working the
+geometry: **some subscribed strike passes zone+otm on virtually every
+bar** (offset is capped at $4.50, the window reaches $3.00 back toward
+spot, and the activation band is ~$1.88 wide). So the zone machinery
+mostly selects WHICH contract, not WHETHER to trade — the portfolio-level
+entry filters are really momentum + velocity + premium band + execution
+quality. §0.3's "hidden vol-regime filter" claim was overstated; the real
+residual effects are (a) subscription-recenter staleness occasionally
+blinding the bot during the fastest moves (an accidental don't-chase
+brake ES won't have — Stage-2 divergence to watch) and (b) the premium
+band clipping late-day/low-vol entries.
+
+Consequence: **zone variant "off" (momentum-only) is the default** on ES;
+"grid" (faithful ×10 geometric replication) is kept as the parity control.
+`tests/test_futures_port.py::test_grid_zone_near_vacuous_at_es_scale`
+encodes the finding as an executable assertion. The travel-trigger variant
+(b) was dropped — it translated a mechanism the SPY system doesn't
+actually have.
+
+### 11.3 Resolved decisions (Q1–Q8)
+
+1. **Venue:** Apex 50K PA — rules above; automation pivot in §11.4.
+2. **Risk:** re-derived from the $2,500 buffer: $125/trade cap AND ≤5% of
+   current headroom; daily loss min($300, 10% headroom) → $250 fresh;
+   weekly min($900, 30% headroom). Prospective gating, as on options.
+3. **MES first: yes.** ES's $12.50/tick makes an 8-tick stop ≈ the whole
+   per-trade budget (1 contract, no granularity); MES gives ~12 contracts.
+4. **Data (world-class default): Databento GLBX.MDP3** 1-min OHLCV for
+   ES+MES history (point-in-time, per-contract series so we do our own
+   volume roll — `futures_contracts.roll_schedule`), NT8/Rithmic export
+   accepted as a secondary format (`load_bars_csv` reads both; NT8 close-
+   stamps are auto-shifted to open convention). ≥1 year before any sweep
+   is trusted.
+5. **NT integration: option (i) confirmed** — C# NinjaScript engine with
+   golden-vector conformance; Python remains the oracle. The bridge is
+   dead (fragile AND non-compliant on Apex).
+6. **Zone:** default "off", "grid" as control (§11.2), both A/B'd in the
+   divergence report.
+7. **RTH-only: confirmed.** VWAP anchored at RTH open, non-RTH bars warm
+   EMAs only (exactly the SPY engine's behavior).
+8. **Sibling-strategy basis: signed off.**
+
+### 11.4 What exists now (built + verified this session)
+
+Python (the oracle — 35 new tests, 251 total green):
+- `futures_contracts.py` — ES/MES specs, third-Friday expiries, volume-roll
+  front-month calendar, tick math, the sizing identity.
+- `apex_risk.py` — the account geometry above, real-time threshold
+  trailing on unrealized peaks, breach detection, headroom sizing,
+  prospective gates, consistency helpers, unrealized-consumption meter.
+- `futures_exits.py` — price-space exit stack: resting stop
+  max(0.75×atr5, 1pt) primary, 1.5×atr5 target, trail (arm 1.0×atr5,
+  40% give-back), stagnation exit (theta's replacement: 20 bars with
+  <0.25×atr5 excursion), 15:25 time stop. All k's provisional pending the
+  replay sweep.
+- `es_engine.py` — shared signal engine: REUSES the live `MomentumEngine`
+  object; velocity gate re-based as fraction of price (3.2bp); futures
+  gate set; no-short-circuit gate reports.
+- `futures_sim.py` — conservative fills: stop-first intrabar ordering,
+  target requires trade-through, adverse slip both ways, commissions.
+- `es_backtest.py` — session runner: point-in-time daily ATR, FOMC
+  blackout/flatten, Apex marked intrabar pessimistically (peak ratchets
+  threshold BEFORE trough tests breach), decisions/trades/states CSVs
+  (crash-safe gzip members, byte-deterministic), Apex survival stats in
+  the summary. CLI.
+- `golden_vectors.py` — golden generation + conformance compare (numeric
+  tol only absorbs decimal formatting; everything else exact). CLI.
+
+C# (`ninjatrader/`):
+- `AofCore.cs` — the engine mirrored line-for-line (momentum, gates,
+  exits, sim, Apex, session runner). Banker's rounding matched to
+  Python's; no NT dependencies.
+- `AofGoldenRunner.cs` + `check_conformance.ps1` — compile with the
+  stock .NET Framework csc, run, diff.
+- `AofEsMomentum.cs` — NT8 **indicator** (co-pilot): arrows, alerts,
+  printed order ticket (side/qty/stop/target from the engine's sizing),
+  soft-exit alerts. Places no orders — no code path exists.
+- `README.md` — install, ATM template workflow, compliance box, Apex
+  cheat sheet.
+
+**Conformance verified in-session** (mono): 7-session synthetic tape,
+2,730 RTH bars × 30 state columns, both zone variants —
+`CONFORMANT — 0 mismatches`. Stage-1 code parity (§7) is a passing
+harness, not a plan.
+
+### 11.5 Still ahead (in order)
+
+1. Buy ≥1yr of MES/ES 1-min from Databento; splice per
+   `roll_schedule`; run `es_backtest.py` per contract segment.
+2. Re-derive exit k's from the recorded options sessions' underlying-move
+   equivalents; sweep on the ES history (slippage 0–4 ticks, roll A/B);
+   pre-registered criteria in §9 decide.
+3. Stage-2 data parity (SPY vs ES bars through the shared engine) and
+   Stage-3 economic divergence (options premium P&L vs ES linear P&L on
+   matched entries) — the convexity question answers itself here.
+4. Apex survival report: breach probability / payout-time distribution
+   under the swept parameter sets, using the intrabar-pessimistic
+   threshold model.
+5. Paper co-pilot dry runs in NT (Sim101/Market Replay) before any PA
+   order. The §9 gate stands: no live-paper until ≥10 sessions positive
+   EV net of costs AND entries proven signal-driven.
