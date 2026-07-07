@@ -539,9 +539,11 @@ nominal balance (`apex_risk.py`), the backtest/golden-vector runner is
 `es_backtest.py`, and the C# NinjaScript engine is gated by machine-checked
 conformance against the Python oracle (`golden_vectors.py` +
 `ninjatrader/check_conformance.ps1`) — it may not trade until the diff
-prints `CONFORMANT`. Because Apex prohibits fully automated trading on
-funded accounts, the NT8 deliverable is a **co-pilot indicator** (signals,
-sizing, alerts; manual entry via ATM bracket), not an auto-trading strategy.
+prints `CONFORMANT`. The NT8 deliverable is `AofEsStrategy`, a **fully
+automated strategy** (one conformance-checked brain, thin order mirror,
+prop-firm rules as parameters) — run it only on accounts whose written
+rules permit automation; Apex's funded accounts do NOT, so a co-pilot
+indicator (`AofEsMomentum`) ships alongside for manual-entry firms.
 
 ---
 

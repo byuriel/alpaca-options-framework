@@ -495,19 +495,44 @@ namespace Aof
         }
     }
 
-    // ── Apex 50K account (mirror of apex_risk.py) ───────────────────────────
+    // ── Prop-firm trailing-drawdown account (mirror of apex_risk.py) ────────
+    // Defaults are the Apex 50K numbers the Python oracle uses; every field
+    // is an instance parameter so the same model fits any firm with a
+    // trailing-threshold rule — set them from the strategy's properties.
     public class ApexAccount
     {
+        public double StartBalance = Cfg.ApexStartBalance;
+        public double TrailingDd   = Cfg.ApexTrailingDd;
+        public double LockBuffer   = Cfg.ApexLockBuffer;
+        public int    MaxMinis     = Cfg.ApexMaxMinis;
+        public bool   HalfUntilNet = Cfg.ApexHalfUntilNet;
+        public double RiskPerTrade     = Cfg.ApexRiskPerTrade;
+        public double RiskHeadroomFrac = Cfg.ApexRiskHeadroomFrac;
+        public double DailyLossCap     = Cfg.ApexDailyLossCap;
+        public double DailyLossFrac    = Cfg.ApexDailyLossFrac;
+        public double WeeklyLossCap    = Cfg.ApexWeeklyLossCap;
+        public double WeeklyLossFrac   = Cfg.ApexWeeklyLossFrac;
+
         public double Balance = Cfg.ApexStartBalance;
         public double PeakEquity = Cfg.ApexStartBalance;
         public double Threshold = Cfg.ApexStartBalance - Cfg.ApexTrailingDd;
         public bool ScalingUnlocked, Breached;
         public double UnrealizedConsumption;
 
-        private static double ThresholdForPeak(double peak)
+        public ApexAccount() { }
+
+        /// Re-derive the mutable state after the rule parameters are set.
+        public void Reset()
         {
-            return Math.Min(peak - Cfg.ApexTrailingDd,
-                            Cfg.ApexStartBalance + Cfg.ApexLockBuffer);
+            Balance = StartBalance; PeakEquity = StartBalance;
+            Threshold = StartBalance - TrailingDd;
+            ScalingUnlocked = false; Breached = false;
+            UnrealizedConsumption = 0.0;
+        }
+
+        private double ThresholdForPeak(double peak)
+        {
+            return Math.Min(peak - TrailingDd, StartBalance + LockBuffer);
         }
 
         public bool MarkEquity(double equity)
@@ -530,8 +555,7 @@ namespace Aof
 
         public void EndOfDay()
         {
-            if (Cfg.ApexHalfUntilNet
-                && Balance >= Cfg.ApexStartBalance + Cfg.ApexTrailingDd + Cfg.ApexLockBuffer)
+            if (HalfUntilNet && Balance >= StartBalance + TrailingDd + LockBuffer)
                 ScalingUnlocked = true;
         }
 
@@ -543,16 +567,16 @@ namespace Aof
 
         public int ContractsCap(Contract spec)
         {
-            int cap = spec.Root == "ES" ? Cfg.ApexMaxMinis : Cfg.ApexMaxMinis * 10;
-            if (Cfg.ApexHalfUntilNet && !ScalingUnlocked) cap = cap / 2;
+            int cap = spec.Root == "ES" ? MaxMinis : MaxMinis * 10;
+            if (HalfUntilNet && !ScalingUnlocked) cap = cap / 2;
             return cap;
         }
 
         public int SizeTrade(int stopTicks, Contract spec, double? equity = null)
         {
             if (Breached || stopTicks <= 0) return 0;
-            double budget = Math.Min(Cfg.ApexRiskPerTrade,
-                                     Cfg.ApexRiskHeadroomFrac * Headroom(equity));
+            double budget = Math.Min(RiskPerTrade,
+                                     RiskHeadroomFrac * Headroom(equity));
             double perContract = stopTicks * spec.TickValue;
             int qty = perContract > 0 ? (int)Math.Floor(budget / perContract) : 0;
             return Math.Max(0, Math.Min(qty, ContractsCap(spec)));
@@ -560,12 +584,12 @@ namespace Aof
 
         public double DailyLossLimit()
         {
-            return Math.Min(Cfg.ApexDailyLossCap, Cfg.ApexDailyLossFrac * Headroom());
+            return Math.Min(DailyLossCap, DailyLossFrac * Headroom());
         }
 
         public double WeeklyLossLimit()
         {
-            return Math.Min(Cfg.ApexWeeklyLossCap, Cfg.ApexWeeklyLossFrac * Headroom());
+            return Math.Min(WeeklyLossCap, WeeklyLossFrac * Headroom());
         }
 
         public bool CanOpen(double nextTradeRisk, double realizedToday, double realizedWeek)
@@ -596,7 +620,7 @@ namespace Aof
 
         public readonly EsSignalEngine Engine;
         public readonly FuturesSim Sim;
-        public readonly ApexAccount Apex = new ApexAccount();
+        public readonly ApexAccount Apex;
         public FuturesPosition Pos;
 
         private DateTime? _session;
@@ -611,10 +635,24 @@ namespace Aof
         public bool EnteredThisBar;
 
         public SessionRunner(string zoneVariant, string specRoot,
-                             double commissionPerSide)
+                             double commissionPerSide,
+                             ApexAccount apex = null)
         {
             Engine = new EsSignalEngine(zoneVariant);
             Sim = new FuturesSim(specRoot, commissionPerSide);
+            Apex = apex ?? new ApexAccount();
+        }
+
+        /// Drop the shadow position WITHOUT booking it. Used by the live
+        /// strategy at the historical→realtime transition: a position the
+        /// shadow opened during warmup was never really traded and must not
+        /// seed a live order mid-flight. Never called by the golden runner.
+        public void AbandonPosition()
+        {
+            if (Pos == null) return;
+            Engine.NoteExit();
+            Pos = null;
+            LastExitReason = "";
         }
 
         private static DateTime IsoWeekThursday(DateTime d)

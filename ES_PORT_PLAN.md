@@ -408,3 +408,37 @@ harness, not a plan.
 5. Paper co-pilot dry runs in NT (Sim101/Market Replay) before any PA
    order. The §9 gate stands: no live-paper until ≥10 sessions positive
    EV net of costs AND entries proven signal-driven.
+
+### 11.6 Decision update — fully automated after all (firm TBD)
+
+User decision after reading §11.1: **the port will be fully automated on
+NinjaTrader; Apex is dropped in favor of a prop firm whose rules permit
+automation** (firm not yet chosen).
+
+Consequences, implemented:
+- `ninjatrader/AofEsStrategy.cs` — fully automated NT8 strategy. One
+  brain, thin mirror: the conformance-checked `SessionRunner` remains the
+  state of record; the shell mirrors its shadow position with real orders
+  (entry + broker-side bracket at shadow levels, market flatten on soft
+  exits, gap/lag backstop on hard exits) and reconciles disagreements
+  with a flat-wins rule. Shadow breach → hard flatten + permanent
+  stand-down.
+- The account model is fully parameterized (`ApexAccount` fields are now
+  instance parameters; Apex-50K defaults retained as the reference).
+  When the firm is chosen, its trailing-DD mechanics (real-time vs EOD,
+  scaling, caps, consistency) get encoded as the strategy's parameter set
+  — and if its geometry differs structurally (e.g., static drawdown),
+  the model gets a variant + tests BEFORE go-live.
+- The co-pilot indicator stays in the tree as the fallback for
+  manual-entry firms.
+- Known approximation, carried forward deliberately: the shadow account
+  books sim fills, so in-strategy risk gates approximate the firm's
+  ledger. Stage-2 adds live-fill reconciliation into the brain.
+- Conformance re-verified after the refactor: both zone variants,
+  0 mismatches.
+
+Firm-selection due diligence (user's task, quant's checklist): written
+confirmation that automation is permitted; trailing-DD basis (real-time
+unrealized vs EOD); max contracts + scaling; consistency rules; payout
+cadence/caps; data/platform fees; whether NT8 + your data feed is
+supported natively.
