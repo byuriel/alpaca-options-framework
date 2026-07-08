@@ -1,5 +1,5 @@
 """
-ES/MES bar-driven session runner — backtest, Apex survival simulation,
+ES/MES bar-driven session runner - backtest, Apex survival simulation,
 decision logging, and golden-vector emission in ONE deterministic loop.
 
     python es_backtest.py bars.csv --out out/es_run [--zone grid] [--spec MES]
@@ -20,7 +20,7 @@ Point-in-time discipline:
 Fill and cost conservatism lives in futures_sim.FuturesSimBroker.
 
 Bar-time convention: bar.t = bar OPEN time (Alpaca/Databento convention).
-NT8 exports stamp bar CLOSE — the loader shifts them back one minute.
+NT8 exports stamp bar CLOSE - the loader shifts them back one minute.
 
 Outputs in --out:
   decisions_es.csv.gz  one row per RTH bar: every gate verdict, sole
@@ -90,7 +90,7 @@ def _f(v, nd=6):
 
 
 class _GzMemberWriter:
-    """Crash-safe by construction — one complete gzip member per batch,
+    """Crash-safe by construction - one complete gzip member per batch,
     mtime=0 for byte determinism. Same policy as decision_logger.py."""
 
     def __init__(self, path: str, header: List[str]):
@@ -118,7 +118,7 @@ class _GzMemberWriter:
         self._raw.close()
 
 
-# ── Bar loading (Databento / NT8 export / generic OHLCV) ─────────────────────
+# -- Bar loading (Databento / NT8 export / generic OHLCV) ---------------------
 
 def load_bars_csv(path: str, symbol: Optional[str] = None) -> List[Bar]:
     with open(path, newline="") as f:
@@ -131,7 +131,7 @@ def load_bars_csv(path: str, symbol: Optional[str] = None) -> List[Bar]:
 
 
 def _parse_ts(raw: str) -> datetime.datetime:
-    """ISO8601 (Z ok) or integer nanoseconds → aware datetime (naive → ET)."""
+    """ISO8601 (Z ok) or integer nanoseconds -> aware datetime (naive -> ET)."""
     raw = raw.strip()
     if raw.isdigit():
         return datetime.datetime.fromtimestamp(int(raw) / 1e9,
@@ -155,7 +155,7 @@ def _load_databento(path: str, symbol: Optional[str]) -> List[Bar]:
                             volume=float(row.get("volume", 0) or 0)))
     if not symbol and len(symbols_seen) > 1:
         raise ValueError(f"multiple symbols in {path}: {sorted(symbols_seen)} "
-                         "— pass symbol= to pick the front contract; mixing "
+                         "- pass symbol= to pick the front contract; mixing "
                          "contracts splices phantom roll gaps into the series")
     return bars
 
@@ -195,7 +195,7 @@ def _load_generic(path: str) -> List[Bar]:
     return bars
 
 
-# ── The runner ────────────────────────────────────────────────────────────────
+# -- The runner ----------------------------------------------------------------
 
 RTH_OPEN  = datetime.time(9, 30)
 RTH_CLOSE = datetime.time(16, 0)
@@ -279,7 +279,7 @@ def run_backtest(bars: List[Bar], *,
         bar_et = bar.t.astimezone(config.ET)
         d      = bar_et.date()
 
-        # ── session roll ──────────────────────────────────────────────────────
+        # -- session roll ------------------------------------------------------
         if d != session:
             if session is not None and cur_hi is not None:
                 tr = (cur_hi - cur_lo if prev_close is None
@@ -308,8 +308,8 @@ def run_backtest(bars: List[Bar], *,
 
         exit_reason_this_bar = ""
 
-        # ── holding: excursions, Apex marks, exits (before this bar's entry
-        #    decision, mirroring live's continuous quote-driven exits) ─────────
+        # -- holding: excursions, Apex marks, exits (before this bar's entry
+        #    decision, mirroring live's continuous quote-driven exits) ---------
         if pos is not None:
             pos.update_on_bar(bar.high, bar.low, bar.close)
 
@@ -341,8 +341,8 @@ def run_backtest(bars: List[Bar], *,
 
         min_headroom = min(min_headroom, apex.headroom())
 
-        # ── signal evaluation (momentum updates on EVERY bar, incl. non-RTH,
-        #    exactly like the live engine) ─────────────────────────────────────
+        # -- signal evaluation (momentum updates on EVERY bar, incl. non-RTH,
+        #    exactly like the live engine) -------------------------------------
         decision = engine.on_bar(bar, has_open_pos=pos is not None)
         if apex.s.breached:
             _flush_decisions()
@@ -353,7 +353,7 @@ def run_backtest(bars: List[Bar], *,
         qty = 0
         stop_px = target_px = None
 
-        # ── entry ─────────────────────────────────────────────────────────────
+        # -- entry -------------------------------------------------------------
         if (is_rth and decision.entry_side and pos is None
                 and not blackout and exit_reason_this_bar == ""):
             atr5 = decision.momentum.atr5
@@ -375,7 +375,7 @@ def run_backtest(bars: List[Bar], *,
             else:
                 qty = 0
 
-        # ── decision + state rows (RTH only — non-RTH bars only warm EMAs) ───
+        # -- decision + state rows (RTH only - non-RTH bars only warm EMAs) ---
         if is_rth:
             m = decision.momentum
             dec_batch.append([

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Feed coverage & quality monitor — turn feed unknowns into daily numbers.
+Feed coverage & quality monitor - turn feed unknowns into daily numbers.
 
     python feed_monitor.py recordings/session_2026-07-06.jsonl.gz
     python feed_monitor.py recordings/session_*.jsonl.gz --json
@@ -10,24 +10,24 @@ while this bot subscribes 43+ option symbols, and the indicative feed's
 sampling behavior is not publicly specified. Neither should be an article of
 faith. This tool measures, from the session recording alone:
 
-  COVERAGE — subscribed symbols vs symbols that actually delivered quotes.
+  COVERAGE - subscribed symbols vs symbols that actually delivered quotes.
     A subscribed-but-silent symbol is a dark spot in the strike window: a
     feed symbol cap, a dead subscription, or a nonexistent contract. Dark
     spots bias WHICH strikes can ever fire, invisibly to the P&L.
 
-  QUALITY — quote inter-arrival distribution (median/p95/max gap during the
+  QUALITY - quote inter-arrival distribution (median/p95/max gap during the
     subscribed window), aggregate quote rate, spread distribution, and the
     one-sided-quote share. Run it on indicative sessions now and OPRA
     sessions later: the before/after diff IS the measured cost of the free
     feed.
 
-  SAFETY — for each trade in the session's CSV (if present), the maximum
-    quote gap on the HELD symbol while the position was open — the number
+  SAFETY - for each trade in the session's CSV (if present), the maximum
+    quote gap on the HELD symbol while the position was open - the number
     the staleness kill switch lives on.
 
 Output: human report (+ exit code 1 below the coverage threshold, so cron
 can alert) and a sidecar JSON next to the recording
-(<recording>.feedreport.json) — recordings stay immutable.
+(<recording>.feedreport.json) - recordings stay immutable.
 """
 
 import argparse
@@ -43,7 +43,7 @@ from typing import Optional
 import config
 import recorder
 
-COVERAGE_FAIL_BELOW = 0.90   # exit non-zero below this — cron turns it into an alert
+COVERAGE_FAIL_BELOW = 0.90   # exit non-zero below this - cron turns it into an alert
 
 
 def _percentile(sorted_vals, q: float) -> float:
@@ -84,14 +84,14 @@ def analyze(recording_path: str, trades_dir: Optional[str] = None) -> dict:
 
     session_secs = (last_w - first_w) if (first_w and last_w) else 0.0
 
-    # ── Coverage ──────────────────────────────────────────────────────────────
+    # -- Coverage --------------------------------------------------------------
     subscribed = set(subscribed_at)
     delivering = set(quote_times)
     dark       = sorted(subscribed - delivering)
     unexpected = sorted(delivering - subscribed)   # quotes without a recorded sub
     coverage   = (len(subscribed & delivering) / len(subscribed)) if subscribed else 1.0
 
-    # ── Inter-arrival quality (per symbol, within its subscribed window) ─────
+    # -- Inter-arrival quality (per symbol, within its subscribed window) -----
     gaps_all = []
     per_symbol_max_gap = {}
     for sym, times in quote_times.items():
@@ -124,7 +124,7 @@ def analyze(recording_path: str, trades_dir: Optional[str] = None) -> dict:
         "held_symbol_gaps":  [],
     }
 
-    # ── Held-symbol gaps (the staleness-relevant number) ─────────────────────
+    # -- Held-symbol gaps (the staleness-relevant number) ---------------------
     date_str = result["session_date"]
     csv_path = os.path.join(trades_dir or config.LOG_DIR, f"trades_{date_str}.csv")
     if date_str and os.path.exists(csv_path):
@@ -150,35 +150,35 @@ def analyze(recording_path: str, trades_dir: Optional[str] = None) -> dict:
 
 def print_report(r: dict):
     W = 74
-    print("═" * W)
-    print(f"  FEED REPORT — {r['session_date']}   "
+    print("=" * W)
+    print(f"  FEED REPORT - {r['session_date']}   "
           f"stock={r['stock_feed']}  options={r['option_feed']}")
-    print("─" * W)
-    cov_icon = "✅" if r["coverage"] >= COVERAGE_FAIL_BELOW else "❌"
+    print("-" * W)
+    cov_icon = "[OK]" if r["coverage"] >= COVERAGE_FAIL_BELOW else "[FAIL]"
     print(f"  Coverage:  {cov_icon} {r['n_delivering']}/{r['n_subscribed']} subscribed "
           f"symbols delivered quotes ({r['coverage']*100:.1f}%)")
     if r["dark_symbols"]:
-        print(f"  DARK symbols (subscribed, zero quotes) — feed cap, dead sub,")
+        print(f"  DARK symbols (subscribed, zero quotes) - feed cap, dead sub,")
         print(f"  or nonexistent contract; these strikes can never fire:")
         for s in r["dark_symbols"]:
             print(f"    {s}")
     if r["unexpected_symbols"]:
         print(f"  Unexpected (quotes without recorded subscription): "
               f"{len(r['unexpected_symbols'])}")
-    print("─" * W)
+    print("-" * W)
     print(f"  Quotes:    {r['n_quotes']:,} total   {r['quotes_per_sec']}/sec aggregate")
     print(f"  Gaps:      median {r['gap_median_s']}s   p95 {r['gap_p95_s']}s   "
           f"max {r['gap_max_s']}s")
     print(f"  Spread:    median {r['spread_median_pct']}%   "
           f"p95 {r['spread_p95_pct']}%   one-sided {r['one_sided_pct']}%")
     if r["held_symbol_gaps"]:
-        print("─" * W)
+        print("-" * W)
         print("  Held-symbol quote gaps (staleness kill switch operates on these):")
         for h in r["held_symbol_gaps"]:
-            flag = "  ⚠" if h["max_gap_s"] > config.STALE_QUOTE_FLATTEN_SEC / 2 else ""
+            flag = "  [WARN]" if h["max_gap_s"] > config.STALE_QUOTE_FLATTEN_SEC / 2 else ""
             print(f"    {h['symbol']:<22} held {h['hold_secs']:>7.0f}s  "
                   f"{h['n_quotes']:>6} quotes  max gap {h['max_gap_s']:>6.1f}s{flag}")
-    print("═" * W)
+    print("=" * W)
 
 
 def main_cli():

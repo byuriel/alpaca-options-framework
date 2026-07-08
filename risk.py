@@ -1,15 +1,15 @@
 """
-Risk manager — position sizing, daily loss gate, and trade cooldown.
+Risk manager - position sizing, daily loss gate, and trade cooldown.
 
-Rules (all HARD limits — none can be exceeded by rounding):
+Rules (all HARD limits - none can be exceeded by rounding):
   - Size each trade so a full stop-loss hit <= MAX_RISK_PER_TRADE. If even a
-    single contract exceeds that, size is 0 and the trade is skipped — the cap
+    single contract exceeds that, size is 0 and the trade is skipped - the cap
     is never rounded up to "at least 1 contract".
   - Cap total premium outlay at MAX_PREMIUM_PER_TRADE. A long 0DTE option can
     gap through its stop; the true worst case is 100% of premium, so the tail
     loss must be bounded independently of the stop.
   - Block new entries *prospectively* when a full stop-out would breach
-    MAX_DAILY_LOSS — not only after the loss is already booked.
+    MAX_DAILY_LOSS - not only after the loss is already booked.
   - Enforce a cooldown of TRADE_COOLDOWN_BARS between trades (prevents chasing).
 """
 
@@ -29,11 +29,11 @@ class RiskManager:
         self._lock_reason:   str   = ""
         self._cooldown_bars: int   = 0       # bars remaining before next entry allowed
         self._week_pnl_prior: float = 0.0    # realized P&L of EARLIER sessions this
-                                             # week (Mon..yesterday) — set at startup
+                                             # week (Mon..yesterday) - set at startup
                                              # from the CSV history; week total =
                                              # this + _daily_pnl
 
-    # ── Queries ───────────────────────────────────────────────────────────────
+    # -- Queries ---------------------------------------------------------------
 
     @property
     def daily_pnl(self) -> float:
@@ -70,7 +70,7 @@ class RiskManager:
             logger.debug("Risk gate LOCKED (%s).", self._lock_reason or "daily loss limit")
             return False
         if self._cooldown_bars > 0:
-            logger.debug("In cooldown — %d bars remaining.", self._cooldown_bars)
+            logger.debug("In cooldown - %d bars remaining.", self._cooldown_bars)
             return False
         if self._trades_today >= config.MAX_TRADES_PER_DAY:
             logger.debug("Max trades per day reached (%d).", self._trades_today)
@@ -83,7 +83,7 @@ class RiskManager:
                 self._daily_pnl, config.MAX_RISK_PER_TRADE, config.MAX_DAILY_LOSS,
             )
             return False
-        # Same prospective logic at the week level — five bad days must not
+        # Same prospective logic at the week level - five bad days must not
         # compound past the weekly line either.
         if self.week_pnl - config.MAX_RISK_PER_TRADE <= -config.WEEKLY_MAX_LOSS:
             logger.debug(
@@ -99,9 +99,9 @@ class RiskManager:
         if not self._locked:
             self._locked      = True
             self._lock_reason = reason
-            logger.warning("RISK GATE LOCKED: %s — no new entries this session.", reason)
+            logger.warning("RISK GATE LOCKED: %s - no new entries this session.", reason)
 
-    # ── Cooldown ──────────────────────────────────────────────────────────────
+    # -- Cooldown --------------------------------------------------------------
 
     def tick_bar(self):
         """Call on every 1-min bar to decrement cooldown counter."""
@@ -110,9 +110,9 @@ class RiskManager:
 
     def start_cooldown(self):
         self._cooldown_bars = config.TRADE_COOLDOWN_BARS
-        logger.info("Cooldown started — %d bars before next entry.", config.TRADE_COOLDOWN_BARS)
+        logger.info("Cooldown started - %d bars before next entry.", config.TRADE_COOLDOWN_BARS)
 
-    # ── Sizing ────────────────────────────────────────────────────────────────
+    # -- Sizing ----------------------------------------------------------------
 
     def size_trade(self, entry_price: float) -> int:
         """
@@ -136,21 +136,21 @@ class RiskManager:
         if contracts < 1:
             logger.info(
                 "Sizing REJECTED: entry=%.2f risk/contract=$%.2f premium/contract=$%.2f "
-                "exceed limits (risk cap $%.2f, premium cap $%.2f) — trade skipped",
+                "exceed limits (risk cap $%.2f, premium cap $%.2f) - trade skipped",
                 entry_price, risk_per_contract, premium_per_contract,
                 config.MAX_RISK_PER_TRADE, config.MAX_PREMIUM_PER_TRADE,
             )
             return 0
 
         logger.info(
-            "Sizing: entry=%.2f risk/contract=$%.2f → %d contract(s) "
+            "Sizing: entry=%.2f risk/contract=$%.2f -> %d contract(s) "
             "(stop risk $%.2f, premium $%.2f)",
             entry_price, risk_per_contract, contracts,
             contracts * risk_per_contract, contracts * premium_per_contract,
         )
         return contracts
 
-    # ── P&L tracking ─────────────────────────────────────────────────────────
+    # -- P&L tracking ---------------------------------------------------------
 
     def record_trade(self, realized_pnl: float):
         """Call after each trade closes with the net P&L (positive or negative)."""

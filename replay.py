@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Deterministic session replay — the same live code, fed recorded market data.
+Deterministic session replay - the same live code, fed recorded market data.
 
     python replay.py recordings/session_2026-07-06.jsonl.gz
     python replay.py recordings/session_*.jsonl.gz --set TP_MULT=1.8 --set STOP_MULT=0.45
     python replay.py recordings/session_2026-07-06.jsonl.gz --out replay_out --quiet
 
-Why this exists: backtests lie in the seams — bar timing, data availability,
+Why this exists: backtests lie in the seams - bar timing, data availability,
 restart behavior, fill assumptions. This harness does NOT reimplement the
 strategy in a backtest dialect. It replays the recorded event stream through
-main.on_spy_bar / main.on_option_quote — the identical functions the live
-bot runs — with a simulated clock (clock.SimClock) and a simulated broker
+main.on_spy_bar / main.on_option_quote - the identical functions the live
+bot runs - with a simulated clock (clock.SimClock) and a simulated broker
 (sim_broker.SimBroker) whose fills are conservative by construction: buys
 cross the spread at the ask, sells hit the bid, resting limits fill only
 when the recorded ask actually crosses.
 
 Guarantees:
-  - Deterministic: same recording + same config → identical fills and an
+  - Deterministic: same recording + same config -> identical fills and an
     identical trades CSV, every run (pinned by tests/test_replay.py).
   - Honest about misses: entries whose limit never crossed are counted in
     the summary (`unfilled_entries`), not silently skipped.
@@ -24,7 +24,7 @@ Guarantees:
     run and restores it afterwards, so one recorded session answers "what
     would STOP_MULT=0.45 have done?" in seconds instead of a live day.
 
-Scope (documented, not hidden): the simulated broker always resolves —
+Scope (documented, not hidden): the simulated broker always resolves -
 broker-failure machinery (close retries, order-history reconciliation,
 ghost adoption) is exercised by unit tests, not by replay. Live-only
 watchers (watchdog thread, status display, staleness flatten) don't run;
@@ -126,9 +126,9 @@ async def _run(rec_path: str, out_dir: str) -> dict:
         logger.info("Early-close session %s: entry_end=%s time_stop=%s",
                     session_date, config.ENTRY_END, config.TIME_STOP)
 
-    import main   # after clock install — module already handles late import fine
+    import main   # after clock install - module already handles late import fine
     try:
-        # Fresh decision stack — identical construction to a live boot
+        # Fresh decision stack - identical construction to a live boot
         broker                       = SimBroker(sim)
         main.momentum_engine         = MomentumEngine()
         main.bot_state               = BotState()
@@ -164,7 +164,7 @@ async def _run(rec_path: str, out_dir: str) -> dict:
         for ev in events:
             sim.advance_to(float(ev[1]))
 
-            # Scheduled-event flatten — same trigger the live event watcher
+            # Scheduled-event flatten - same trigger the live event watcher
             # fires on; replayed FOMC days must behave like live ones
             flatten_why = event_calendar.should_flatten_for_event(sim.now_et())
             if (flatten_why is not None
@@ -173,11 +173,11 @@ async def _run(rec_path: str, out_dir: str) -> dict:
                 await main._execute_exit("event_flatten")
                 await _drain()
 
-            # Data-staleness kill switch — the live watcher flattens when the
+            # Data-staleness kill switch - the live watcher flattens when the
             # held symbol's quotes go silent. A recorded feed gap must produce
             # the same flatten in replay, or replay diverges from live on
             # exactly the sessions with data incidents. (Fires at the next
-            # event after the threshold rather than threshold+0s — the live
+            # event after the threshold rather than threshold+0s - the live
             # watcher polls at 5s granularity, so both are approximate; the
             # exit price is the last known bid either way.)
             pos = main.bot_state.position
@@ -192,7 +192,7 @@ async def _run(rec_path: str, out_dir: str) -> dict:
                     await main._execute_exit("stale_data")
                     await _drain()
 
-            # Session time stop — same trigger the live watcher fires on
+            # Session time stop - same trigger the live watcher fires on
             if sim.now_et().strftime("%H:%M") >= config.TIME_STOP:
                 if main.bot_state.entry_pending:
                     # let a resting entry hit its timeout deterministically
@@ -206,14 +206,14 @@ async def _run(rec_path: str, out_dir: str) -> dict:
                 break
 
             if ev[0] == "s":
-                continue   # subscription bookkeeping — feed_monitor's input,
+                continue   # subscription bookkeeping - feed_monitor's input,
                            # not a market event; replay derives routing itself
             if ev[0] == "b":
                 _, _, ts_iso, o, h, l, c, v = ev
                 bar = _SimBar(datetime.datetime.fromisoformat(ts_iso), o, h, l, c, v)
                 await main.on_spy_bar(bar)
                 n_bars += 1
-            else:  # "q" — 6-field (pre-size) and 8-field rows both replay
+            else:  # "q" - 6-field (pre-size) and 8-field rows both replay
                 sym, bid, ask, exch_iso = ev[2], ev[3], ev[4], ev[5]
                 # Broker sees the tick BEFORE the decision code, exactly like
                 # live: the exchange had the quote before the bot acted on it.
@@ -226,7 +226,7 @@ async def _run(rec_path: str, out_dir: str) -> dict:
             broker.notify_tick()   # wake resting orders on the new tick
             await _drain()
 
-            # 30-second exit-monitor cadence (live safety net, simulated —
+            # 30-second exit-monitor cadence (live safety net, simulated -
             # it re-evaluates cached quotes during quote gaps and can fire
             # exits, so omitting it would change outcomes)
             pos = main.bot_state.position
@@ -245,7 +245,7 @@ async def _run(rec_path: str, out_dir: str) -> dict:
 
         if stop_reason == "eof":
             # Resolve resting entries (timeout) and flush any open position at
-            # the last recorded quote — booked under a DISTINCT reason so
+            # the last recorded quote - booked under a DISTINCT reason so
             # truncated-recording flushes never pollute strategy exit stats.
             sim.advance_by(broker.fill_timeout + 1)
             broker.notify_tick()
@@ -290,7 +290,7 @@ def _load_trades(out_dir: str, session_date) -> list:
 def run_session(rec_path: str, out_dir: str, overrides: Optional[dict] = None) -> dict:
     """
     Replay one recorded session. `overrides` maps config attribute names to
-    values applied for this run only — the sweep mechanism. Every mutated
+    values applied for this run only - the sweep mechanism. Every mutated
     attribute is restored afterwards, so runs cannot contaminate each other.
     """
     os.makedirs(out_dir, exist_ok=True)
@@ -308,7 +308,7 @@ def run_session(rec_path: str, out_dir: str, overrides: Optional[dict] = None) -
 
 
 def _print_summary(s: dict):
-    print("─" * 72)
+    print("-" * 72)
     print(f"  {os.path.basename(s['recording'])}  ({s['session_date']})  "
           f"stop={s['stop_reason']}")
     print(f"  events: {s['bars']} bars, {s['quotes']} quotes  |  "
@@ -317,9 +317,9 @@ def _print_summary(s: dict):
     for r in s["rows"]:
         print(f"    {r['entry_time'][11:19]}  {r['symbol']:<21} {r['side']:<4} "
               f"{int(float(r['qty']))}x  {float(r['entry_price']):.2f}"
-              f"→{float(r['exit_price']):.2f}  {r['reason']:<10} "
+              f"->{float(r['exit_price']):.2f}  {r['reason']:<10} "
               f"${float(r['realized_pnl']):+8.2f}")
-    print("─" * 72)
+    print("-" * 72)
 
 
 def main_cli():

@@ -7,16 +7,16 @@ handle_trade_update, cancel_all_options[_async], get_fill_price,
 get_filled_qty), so main.py's entry/exit/sweeper code runs UNMODIFIED against
 recorded market data.
 
-Execution model — conservative by construction, because a replay that fills
+Execution model - conservative by construction, because a replay that fills
 better than reality is worse than no replay:
 
   BUY (limit): fills at the ASK (you cross the spread; the limit only caps
     the price). If the ask is above the limit, the order RESTS and re-checks
     on every subsequent recorded quote, exactly like the live 30s fill wait;
-    if the simulated clock passes FILL_TIMEOUT first, the entry fails —
+    if the simulated clock passes FILL_TIMEOUT first, the entry fails -
     a missed fill is a real outcome and is counted, not papered over.
 
-  SELL (market close): fills at the BID — what a market sell receives. If
+  SELL (market close): fills at the BID - what a market sell receives. If
     the bid is momentarily zero, the last known nonzero bid is used, floored
     at $0.01 (a market order always clears somewhere; pretending otherwise
     would route replay into the broker-failure machinery, which is unit-
@@ -24,7 +24,7 @@ better than reality is worse than no replay:
 
 Determinism: no wall clock, no threads, no network. Time is the injected
 SimClock; order resolution is driven by notify_tick() from the replay pump.
-Same recording + same config → identical fills, identical CSV, every run.
+Same recording + same config -> identical fills, identical CSV, every run.
 """
 
 import asyncio
@@ -66,7 +66,7 @@ class SimBroker:
         self.fills             = []  # (kind, symbol, px, qty, sim_time)
         self.unfilled_entries  = 0
 
-    # ── Replay-pump integration ───────────────────────────────────────────────
+    # -- Replay-pump integration -----------------------------------------------
 
     def on_quote(self, symbol: str, bid: float, ask: float):
         self._quotes[symbol] = (bid, ask)
@@ -85,14 +85,14 @@ class SimBroker:
             self._tick_fut = asyncio.get_running_loop().create_future()
         await self._tick_fut
 
-    # ── OrderManager surface ──────────────────────────────────────────────────
+    # -- OrderManager surface --------------------------------------------------
 
     async def buy_limit(self, symbol: str, qty: int, limit_px: float) -> Optional[SimOrder]:
         deadline = self._clk.monotonic() + self.fill_timeout
         while True:
             bid, ask = self._quotes.get(symbol, (0.0, 0.0))
             if 0 < ask <= limit_px:
-                fill_px = ask          # cross the spread — the honest cost
+                fill_px = ask          # cross the spread - the honest cost
                 self._next_id += 1
                 oid = f"sim-buy-{self._next_id}"
                 pos = self._positions.get(symbol)
@@ -109,7 +109,7 @@ class SimBroker:
                 return SimOrder(oid, fill_px, qty)
             if self._clk.monotonic() >= deadline:
                 self.unfilled_entries += 1
-                logger.info("SIM BUY unfilled: %s limit=%.2f ask=%.2f — timed out",
+                logger.info("SIM BUY unfilled: %s limit=%.2f ask=%.2f - timed out",
                             symbol, limit_px, ask)
                 return None
             await self._wait_tick()   # rest until the next recorded quote
@@ -136,7 +136,7 @@ class SimBroker:
         return list(self._positions.values())
 
     async def find_recent_close_fill(self, symbol: str):
-        return None   # sim closes resolve synchronously — nothing to reconcile
+        return None   # sim closes resolve synchronously - nothing to reconcile
 
     def cancel_all_options(self):
         pass
@@ -147,6 +147,6 @@ class SimBroker:
     def handle_trade_update(self, update):
         pass
 
-    # Same fill interpretation as live — shared, never reimplemented
+    # Same fill interpretation as live - shared, never reimplemented
     get_fill_price = staticmethod(OrderManager.get_fill_price)
     get_filled_qty = staticmethod(OrderManager.get_filled_qty)

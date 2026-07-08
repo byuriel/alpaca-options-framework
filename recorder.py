@@ -1,8 +1,8 @@
 """
 Market-data recorder + reader.
 
-Records every event the DECISION code receives — SPY 1-min bars and option
-quotes, in receive order, with receive timestamps — plus one metadata line
+Records every event the DECISION code receives - SPY 1-min bars and option
+quotes, in receive order, with receive timestamps - plus one metadata line
 (config snapshot, ATR baseline, momentum preseed bars, chain symbols) so a
 session can be replayed through the exact same code paths by replay.py.
 
@@ -12,25 +12,25 @@ Design constraints, in order:
   2. NEVER drop silently. A full queue increments a counter that is logged
      and stamped into the file; a recording that lost events says so.
   3. Survive the bot's own exit style. The bot hard-exits via os._exit(0) by
-     design (documented feed-teardown hang), which skips file close — so the
+     design (documented feed-teardown hang), which skips file close - so the
      writer flushes with gzip sync points every few seconds, and the reader
      tolerates a truncated tail instead of refusing the whole file. Worst
      case a few seconds around the 15:25 exit are lost, after which no
      decisions happen anyway.
 
-Line formats (JSONL, compact arrays — ~40% smaller than dicts at this volume):
+Line formats (JSONL, compact arrays - ~40% smaller than dicts at this volume):
   ["m", recv_wall, {metadata...}]
   ["b", recv_wall, bar_ts_iso, open, high, low, close, volume]
   ["q", recv_wall, symbol, bid, ask, exch_ts_iso, bid_size, ask_size]
   ["s", recv_wall, [symbols...]]        # subscription event (open + expansions)
 
-recv_wall is the local receive time (epoch seconds) — the axis replay's
+recv_wall is the local receive time (epoch seconds) - the axis replay's
 simulated clock runs on. Exchange timestamps are preserved for analysis but
 ordering is by receipt, because that is what the live process experienced.
 
 Quote SIZES are captured even though the decision code doesn't use them yet:
 displayed size enables a size-aware fill model later (fill only up to the
-NBBO size), and size history cannot be retro-captured — every session
+NBBO size), and size history cannot be retro-captured - every session
 recorded without it is permanently lost to that analysis. Readers tolerate
 the older 6-field quote rows (sizes default to 0).
 """
@@ -63,7 +63,7 @@ class MarketDataRecorder:
         # complete, self-terminated gzip member (mtime=0). A long-lived gzip
         # stream would be left unterminated by the bot's deliberate hard
         # exits (os._exit / watchdog execl), and a restart appending after an
-        # unterminated member corrupts everything past the restart point —
+        # unterminated member corrupts everything past the restart point -
         # on exactly the disrupted sessions that matter most. Concatenated
         # complete members are read natively by gzip.
         self._raw      = open(path, "ab")
@@ -72,7 +72,7 @@ class MarketDataRecorder:
         self._thread.start()
         logger.info("Market data recorder active: %s", path)
 
-    # ── Producers (event-loop side — must stay allocation-light) ─────────────
+    # -- Producers (event-loop side - must stay allocation-light) -------------
 
     def record_meta(self, meta: dict):
         self._put(["m", time.time(), meta])
@@ -103,10 +103,10 @@ class MarketDataRecorder:
     def dropped(self) -> int:
         return self._dropped
 
-    # ── Writer thread ─────────────────────────────────────────────────────────
+    # -- Writer thread ---------------------------------------------------------
 
     def _write_member(self, lines: list):
-        """One complete gzip member per flush batch — the file on disk is
+        """One complete gzip member per flush batch - the file on disk is
         valid after every flush, no close() ever required."""
         import io
         buf = io.BytesIO()
@@ -140,11 +140,11 @@ class MarketDataRecorder:
                         last_drop_no = self._dropped
             except Exception as e:
                 logger.error("Recorder write failed: %s", e)
-                batch = []          # drop, never duplicate — see failure policy
+                batch = []          # drop, never duplicate - see failure policy
                 time.sleep(1)
 
     def close(self):
-        """Best-effort clean close (not guaranteed to run — see module doc)."""
+        """Best-effort clean close (not guaranteed to run - see module doc)."""
         if self._dropped:
             self._put(["m", time.time(), {"dropped_events": self._dropped}])
         self._stop.set()
@@ -155,15 +155,15 @@ class MarketDataRecorder:
             pass
 
 
-# ── Reader ─────────────────────────────────────────────────────────────────────
+# -- Reader ---------------------------------------------------------------------
 
 def read_events(path: str) -> Iterator[list]:
     """
     Yield recorded events in file (= receive) order. Tolerates:
-      - a truncated gzip tail (os._exit before close) — yields what's intact
-      - individual corrupt lines — skipped with a warning count
+      - a truncated gzip tail (os._exit before close) - yields what's intact
+      - individual corrupt lines - skipped with a warning count
     """
-    import zlib   # zlib.error does NOT subclass OSError — must be in the net
+    import zlib   # zlib.error does NOT subclass OSError - must be in the net
     corrupt = 0
     try:
         with gzip.open(path, "rt", encoding="utf-8") as f:
@@ -176,8 +176,8 @@ def read_events(path: str) -> Iterator[list]:
                 except json.JSONDecodeError:
                     corrupt += 1
     except (EOFError, OSError, gzip.BadGzipFile, zlib.error) as e:
-        # Truncated tail from a hard exit — everything already yielded is good
-        logger.warning("Recording %s has a truncated tail (%s) — using intact prefix",
+        # Truncated tail from a hard exit - everything already yielded is good
+        logger.warning("Recording %s has a truncated tail (%s) - using intact prefix",
                        path, e)
     if corrupt:
         logger.warning("Recording %s: skipped %d corrupt lines", path, corrupt)
@@ -186,9 +186,9 @@ def read_events(path: str) -> Iterator[list]:
 def load_session(path: str):
     """
     Read a recording into (meta, events):
-      meta   — the FIRST metadata dict (session provenance); later "m" lines
+      meta   - the FIRST metadata dict (session provenance); later "m" lines
                (restart markers) are folded in for missing keys only.
-      events — list of ["b"|"q", ...] rows in receive order.
+      events - list of ["b"|"q", ...] rows in receive order.
     """
     meta: Optional[dict] = None
     events = []

@@ -1,26 +1,26 @@
 """
-CME equity-index futures contract math — ES / MES.
+CME equity-index futures contract math - ES / MES.
 
 Everything here is deterministic arithmetic on dates and prices; no I/O, no
 market data. This module is part of the shared spec that the C# NinjaScript
 port must reproduce (see ninjatrader/), so keep it dependency-free and exact.
 
 Contract facts (CME):
-  ES  — E-mini S&P 500:  $50 / index point,  tick 0.25  → $12.50 / tick
-  MES — Micro E-mini:    $5  / index point,  tick 0.25  → $1.25  / tick
+  ES  - E-mini S&P 500:  $50 / index point,  tick 0.25  -> $12.50 / tick
+  MES - Micro E-mini:    $5  / index point,  tick 0.25  -> $1.25  / tick
   Quarterly cycle H(Mar) M(Jun) U(Sep) Z(Dec); expiry = third Friday of the
   contract month, 09:30 ET AM settlement.
 
 Roll policy (backtest continuity + live front-month selection):
   Liquidity migrates to the next quarterly ~8 calendar days before expiry
   ("roll Thursday", the Thursday of the week before expiration week). We
-  define roll_date = expiry − 8 days and treat the NEW contract as front
+  define roll_date = expiry - 8 days and treat the NEW contract as front
   from roll_date (inclusive). Live trading should confirm by volume, but
   this rule matches the observed crossover within a day.
 
 Back-adjustment policy (repo rule, stated once here): back-adjusted series
-may be used ONLY for returns/indicator continuity. All absolute levels —
-stops, targets, fills — are computed on UNADJUSTED front-month prices.
+may be used ONLY for returns/indicator continuity. All absolute levels -
+stops, targets, fills - are computed on UNADJUSTED front-month prices.
 """
 
 import datetime
@@ -100,7 +100,7 @@ def round_to_tick(price: float, tick: float = TICK_SIZE) -> float:
 
 
 def ticks_between(a: float, b: float, tick: float = TICK_SIZE) -> int:
-    """|a − b| expressed in whole ticks (values are rounded to grid first)."""
+    """|a - b| expressed in whole ticks (values are rounded to grid first)."""
     return int(round(abs(a - b) / tick))
 
 
@@ -111,7 +111,7 @@ def dollar_risk(stop_ticks: int, spec: ContractSpec, contracts: int) -> float:
 
 def roll_schedule(start: datetime.date, end: datetime.date,
                   root: str = "ES") -> List[dict]:
-    """Front-month segments covering [start, end] — the backtest splicing
+    """Front-month segments covering [start, end] - the backtest splicing
     table. Each row: contract code, first/last session as front, expiry."""
     rows = []
     d = start

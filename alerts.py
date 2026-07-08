@@ -1,5 +1,5 @@
 """
-Critical-event alerting — the bot must never fail silently.
+Critical-event alerting - the bot must never fail silently.
 
 Every CRITICAL log line (staleness flatten, EXIT FAILED + gate lock, exit
 desync, reconciliation mismatch, watchdog restart) is forwarded to the
@@ -12,20 +12,20 @@ Design constraints, in order:
      queue; emit() is enqueue-only. Known hard-exit paths call flush() with
      a short timeout so the final alert escapes before os._exit().
   2. NEVER crash or recurse. Delivery errors are swallowed (logged at DEBUG
-     — logging them higher could re-enter the handler). The handler is a
+     - logging them higher could re-enter the handler). The handler is a
      no-op unless a channel is configured.
   3. NEVER spam. Per-message-key cooldown (default 5 min) and a daily cap:
      a CRITICAL that repeats every 5 seconds reaches the operator once,
      with a suppression count, not 400 times.
 
 Channels (all stdlib):
-  - Webhook: ALERT_WEBHOOK_URL — JSON POST {"text": ...} (Slack-compatible;
+  - Webhook: ALERT_WEBHOOK_URL - JSON POST {"text": ...} (Slack-compatible;
     for Discord append /slack to the webhook URL).
   - Email:   ALERT_EMAIL_TO + ALERT_SMTP_HOST [ALERT_SMTP_PORT=587,
-    ALERT_SMTP_USER, ALERT_SMTP_PASS] — STARTTLS when credentials given.
+    ALERT_SMTP_USER, ALERT_SMTP_PASS] - STARTTLS when credentials given.
 
 Wiring: main() attaches AlertHandler to the root logger at startup (live
-only — replay never attaches it), so every current and future
+only - replay never attaches it), so every current and future
 logger.critical() call is covered with zero call-site changes.
 """
 
@@ -44,7 +44,7 @@ import config
 logger = logging.getLogger(__name__)
 
 COOLDOWN_SEC   = 300    # per message-key
-DAILY_CAP      = 20     # absolute sends per day — a storm reaches you once
+DAILY_CAP      = 20     # absolute sends per day - a storm reaches you once
 SEND_TIMEOUT   = 5.0    # per-channel network timeout (seconds)
 _KEY_LEN       = 60     # message prefix used as the dedup key
 
@@ -75,7 +75,7 @@ class AlertSender:
     def enabled(self) -> bool:
         return bool(self.webhook_url or (self.email_to and self.smtp_host))
 
-    # ── Producer side (event-loop safe: enqueue only) ─────────────────────────
+    # -- Producer side (event-loop safe: enqueue only) -------------------------
 
     def alert(self, message: str):
         """Rate-limited, non-blocking. Safe to call from anywhere."""
@@ -101,13 +101,13 @@ class AlertSender:
             pass   # cap already bounds this; never block
 
     def flush(self, timeout: float = 3.0):
-        """Best-effort drain before a hard exit — the last alert is usually
+        """Best-effort drain before a hard exit - the last alert is usually
         the one that matters most."""
         deadline = time.monotonic() + timeout
         while not self._q.empty() and time.monotonic() < deadline:
             time.sleep(0.05)
 
-    # ── Delivery thread ───────────────────────────────────────────────────────
+    # -- Delivery thread -------------------------------------------------------
 
     def _sender_loop(self):
         while True:
@@ -150,7 +150,7 @@ class AlertSender:
 
 class AlertHandler(logging.Handler):
     """Forwards CRITICAL log records to the sender. Attached once by main()
-    — every logger.critical() anywhere in the codebase becomes an alert."""
+    - every logger.critical() anywhere in the codebase becomes an alert."""
 
     def __init__(self, sender: AlertSender):
         super().__init__(level=logging.CRITICAL)
@@ -163,7 +163,7 @@ class AlertHandler(logging.Handler):
             pass   # an alert failure must never take down logging
 
 
-# ── Module singleton (configured from env by main(); no-op otherwise) ─────────
+# -- Module singleton (configured from env by main(); no-op otherwise) ---------
 
 _sender: AlertSender = AlertSender()   # disabled default (no channels)
 

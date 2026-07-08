@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Nightly broker reconciliation — the local trade record vs Alpaca's.
+Nightly broker reconciliation - the local trade record vs Alpaca's.
 
     python reconcile.py                      # today's session
     python reconcile.py --date 2026-07-06
@@ -16,13 +16,13 @@ against the broker's closed orders, matched BY ORDER ID:
   - average fill price matches within PRICE_TOL
   - sides are correct (entries buy, exits sell)
   - broker option orders for the bot's underlying that the CSV does NOT
-    know about are surfaced (ghost sweeps, manual interventions — each one
+    know about are surfaced (ghost sweeps, manual interventions - each one
     listed for the operator to classify)
 
 Outcome contract:
-  PASS  → exit 0, one summary line.
-  FAIL  → exit 1, every discrepancy listed, logs/reconcile_FAIL_<date>.flag
-          written, and a CRITICAL log (→ alert, if channels configured).
+  PASS  -> exit 0, one summary line.
+  FAIL  -> exit 1, every discrepancy listed, logs/reconcile_FAIL_<date>.flag
+          written, and a CRITICAL log (-> alert, if channels configured).
           At the next startup, main() sees the flag and LOCKS the entry gate
           until the operator investigates and runs --clear. Trading does not
           resume on top of unexplained numbers.
@@ -45,7 +45,7 @@ import config
 
 logger = logging.getLogger("reconcile")
 
-PRICE_TOL = 0.005   # dollars — avg fill prices are exact in practice; this
+PRICE_TOL = 0.005   # dollars - avg fill prices are exact in practice; this
                     # tolerates float/decimal representation only
 FLAG_GLOB = "reconcile_FAIL_*.flag"
 
@@ -54,14 +54,14 @@ def _flag_path(date) -> str:
     return os.path.join(config.LOG_DIR, f"reconcile_FAIL_{date}.flag")
 
 
-# ── Local side ─────────────────────────────────────────────────────────────────
+# -- Local side -----------------------------------------------------------------
 
 def load_local_orders(date_str: str, log_dir: Optional[str] = None):
     """
     Read the session CSV into order-level expectations:
       entries: {order_id: {"symbol", "qty", "price"}}   (legs aggregated)
       exits:   {order_id: {"symbol", "qty", "price"}}
-    Rows with sentinel IDs ("recovered") are returned separately — they are
+    Rows with sentinel IDs ("recovered") are returned separately - they are
     known-degraded restarts, reported but not failed.
     """
     path = os.path.join(log_dir or config.LOG_DIR, f"trades_{date_str}.csv")
@@ -94,7 +94,7 @@ def load_local_orders(date_str: str, log_dir: Optional[str] = None):
     return entries, exits, degraded
 
 
-# ── Broker side ────────────────────────────────────────────────────────────────
+# -- Broker side ----------------------------------------------------------------
 
 def fetch_broker_orders(date_str: str) -> List[dict]:
     """Closed, filled option orders for the bot's underlying on the session
@@ -133,7 +133,7 @@ def fetch_broker_orders(date_str: str) -> List[dict]:
     return out
 
 
-# ── Matching core (pure — this is what the tests pin) ─────────────────────────
+# -- Matching core (pure - this is what the tests pin) -------------------------
 
 def reconcile(entries: dict, exits: dict, broker_orders: List[dict],
               degraded: Optional[list] = None) -> dict:
@@ -161,7 +161,7 @@ def reconcile(entries: dict, exits: dict, broker_orders: List[dict],
                     f"broker={b['symbol']}")
             if b["side"] != expected_side:
                 problems.append(
-                    f"{kind} {oid}: side mismatch — expected {expected_side}, "
+                    f"{kind} {oid}: side mismatch - expected {expected_side}, "
                     f"broker says {b['side']}")
             if b["qty"] != exp["qty"]:
                 problems.append(
@@ -175,19 +175,19 @@ def reconcile(entries: dict, exits: dict, broker_orders: List[dict],
     _check(entries, "buy", "ENTRY")
     _check(exits,  "sell", "EXIT")
 
-    # Broker activity the CSV knows nothing about — ghost sweeps, manual
+    # Broker activity the CSV knows nothing about - ghost sweeps, manual
     # trades, unbooked fills. Every one must be explainable by the operator.
     for o in broker_orders:
         if o["id"] not in matched_ids:
             problems.append(
                 f"UNMATCHED broker order {o['id']}: {o['side']} "
-                f"{o['symbol']} x{o['qty']} @ {o['price']:.2f} — "
+                f"{o['symbol']} x{o['qty']} @ {o['price']:.2f} - "
                 f"not in the local record (ghost close? manual trade?)")
 
     for r in degraded or []:
         notes.append(
             f"degraded-recovery row (no verifiable entry order id): "
-            f"{r.get('symbol')} x{r.get('qty')} — restart artifact, review once")
+            f"{r.get('symbol')} x{r.get('qty')} - restart artifact, review once")
 
     return {
         "ok":        not problems,
@@ -199,17 +199,17 @@ def reconcile(entries: dict, exits: dict, broker_orders: List[dict],
     }
 
 
-# ── Startup gate integration ───────────────────────────────────────────────────
+# -- Startup gate integration ---------------------------------------------------
 
 def pending_failure_flag(log_dir: Optional[str] = None) -> Optional[str]:
     """Path of an uncleared reconciliation failure, or None. main() locks
-    the entry gate when this is set — trading does not resume on top of
+    the entry gate when this is set - trading does not resume on top of
     unexplained numbers."""
     flags = sorted(glob.glob(os.path.join(log_dir or config.LOG_DIR, FLAG_GLOB)))
     return flags[-1] if flags else None
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
+# -- CLI ------------------------------------------------------------------------
 
 def run(date_str: str) -> dict:
     entries, exits, degraded = load_local_orders(date_str)
@@ -217,32 +217,32 @@ def run(date_str: str) -> dict:
     result = reconcile(entries, exits, broker, degraded)
 
     W = 74
-    print("═" * W)
-    print(f"  RECONCILIATION — {date_str}   local orders: {result['n_local']}   "
+    print("=" * W)
+    print(f"  RECONCILIATION - {date_str}   local orders: {result['n_local']}   "
           f"broker orders: {result['n_broker']}   matched: {result['n_matched']}")
-    print("─" * W)
+    print("-" * W)
     for n in result["notes"]:
         print(f"  NOTE: {n}")
     if result["ok"]:
-        print("  ✅ CLEAN — every local order confirmed at the broker, "
+        print("  [OK] CLEAN - every local order confirmed at the broker, "
               "no unexplained broker activity.")
     else:
         for p in result["problems"]:
-            print(f"  ❌ {p}")
+            print(f"  [FAIL] {p}")
         flag = _flag_path(date_str)
         os.makedirs(os.path.dirname(flag), exist_ok=True)
         with open(flag, "w") as f:
             f.write("\n".join(result["problems"]) + "\n")
-        print("─" * W)
+        print("-" * W)
         print(f"  FAIL flag written: {flag}")
         print("  The bot will LOCK its entry gate at next startup until this is")
         print("  investigated and cleared:  python reconcile.py --clear")
         logger.critical(
-            "RECONCILIATION FAILED for %s: %d discrepancies — entry gate will "
+            "RECONCILIATION FAILED for %s: %d discrepancies - entry gate will "
             "lock at next startup. %s", date_str, len(result["problems"]),
             "; ".join(result["problems"][:3]),
         )
-    print("═" * W)
+    print("=" * W)
     return result
 
 

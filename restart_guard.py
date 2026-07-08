@@ -1,14 +1,14 @@
 """
-Restart-storm brake — an infinite failure loop becomes one loud stop.
+Restart-storm brake - an infinite failure loop becomes one loud stop.
 
 The watchdog auto-restarts the process when the event loop goes silent.
-That is the right call for a one-off hang — and exactly the wrong thing to
+That is the right call for a one-off hang - and exactly the wrong thing to
 do forever: a restart CASCADE (bad dependency update, corrupted state, an
 API change at the broker) means every boot re-enters the same failure,
 possibly re-entering positions between crashes, with nobody watching. This
-repo's own history includes a 15× watchdog loop (Jun 30).
+repo's own history includes a 15x watchdog loop (Jun 30).
 
-Mechanism (file-based — it must survive the very restarts it counts):
+Mechanism (file-based - it must survive the very restarts it counts):
   - The watchdog appends a timestamp to logs/restart_log.txt before execl.
   - At startup, main() counts restarts inside RESTART_STORM_WINDOW_SEC.
     At RESTART_STORM_MAX or more: flatten this bot's positions via REST,
@@ -19,7 +19,7 @@ Mechanism (file-based — it must survive the very restarts it counts):
 
 Scope note: this counts WATCHDOG restarts only. Keyboard 'r' restarts are
 intentional operator actions, and service-manager crash loops belong to the
-service manager (systemd StartLimitBurst) — both deliberately excluded.
+service manager (systemd StartLimitBurst) - both deliberately excluded.
 """
 
 import argparse

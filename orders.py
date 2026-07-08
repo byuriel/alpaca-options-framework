@@ -3,14 +3,14 @@ Order manager.
 
 Alpaca options reality:
   - BUY:    simple limit order works fine
-  - SELL:   submit_order fails ("insufficient buying power") — treated as new short
-  - CLOSE:  close_position() works — Alpaca recognises it as closing a long
+  - SELL:   submit_order fails ("insufficient buying power") - treated as new short
+  - CLOSE:  close_position() works - Alpaca recognises it as closing a long
   - BRACKET: not supported for options ("complex orders not supported")
 
 So: buy_limit() for entry, close_position() for all exits.
 
 Execution architecture:
-  - Every REST call runs via asyncio.to_thread() — the alpaca-py TradingClient
+  - Every REST call runs via asyncio.to_thread() - the alpaca-py TradingClient
     is synchronous HTTP, and a blocking call on the event loop freezes all
     three WebSocket streams (bars, quotes, fills) for its duration. Off-loop,
     a slow Alpaca response can no longer stall quote processing or trip the
@@ -24,7 +24,7 @@ Execution architecture:
     (previously the contracts were silently owned and untracked until the
     ghost sweeper round-tripped them at market).
   - Orders this bot submits carry a CLIENT_ORDER_PREFIX client_order_id, and
-    cleanup (cancel_all_options) only touches this bot's underlying — it no
+    cleanup (cancel_all_options) only touches this bot's underlying - it no
     longer cancels every option order on the account.
 """
 
@@ -71,7 +71,7 @@ class OrderManager:
         # config.validate_credentials() in main() can print its actionable
         # message. First real use happens well after validation.
         self._client_instance: Optional[TradingClient] = None
-        # TradingStream fast-path: order_id → latest Order, and per-order
+        # TradingStream fast-path: order_id -> latest Order, and per-order
         # events so _wait_for_fill wakes the instant a fill event arrives.
         self._stream_orders: dict[str, Order] = {}
         self._stream_events: dict[str, asyncio.Event] = {}
@@ -82,7 +82,7 @@ class OrderManager:
             self._client_instance = _make_client()
         return self._client_instance
 
-    # ── TradingStream integration ─────────────────────────────────────────────
+    # -- TradingStream integration ---------------------------------------------
 
     def handle_trade_update(self, update):
         """Called from main.on_trade_update for every order event. Caches the
@@ -102,7 +102,7 @@ class OrderManager:
         except Exception as e:
             logger.debug("handle_trade_update parse error: %s", e)
 
-    # ── Entry ─────────────────────────────────────────────────────────────────
+    # -- Entry -----------------------------------------------------------------
 
     async def buy_limit(
         self,
@@ -134,12 +134,12 @@ class OrderManager:
         try:
             filled = await self._wait_for_fill(order_id)
         except asyncio.CancelledError:
-            # Task cancelled while waiting for fill — attempt cancel on Alpaca.
+            # Task cancelled while waiting for fill - attempt cancel on Alpaca.
             # If the order already filled, cancel fails silently. Recover any
             # fill (full OR partial) here instead of re-raising blind, so the
             # caller tracks the real position rather than seeing "no order in
             # flight" and submitting a duplicate entry on the next quote tick.
-            logger.warning("BUY fill-wait cancelled — attempting cancel of %s", order_id)
+            logger.warning("BUY fill-wait cancelled - attempting cancel of %s", order_id)
             await self._cancel(order_id)
             recovered = await self._recheck_fill(order_id, context="post-cancel")
             if recovered is not None:
@@ -149,7 +149,7 @@ class OrderManager:
         if filled is None:
             logger.warning("BUY timed out, cancelling: %s", order_id)
             await self._cancel(order_id)
-            # Give Alpaca a moment, then check for a fill that landed anyway —
+            # Give Alpaca a moment, then check for a fill that landed anyway -
             # including a PARTIAL fill, which we adopt as the position.
             await asyncio.sleep(1)
             return await self._recheck_fill(order_id, context="post-timeout")
@@ -179,7 +179,7 @@ class OrderManager:
         adopted = self._adoptable(status)
         if adopted is not None:
             logger.warning(
-                "RECOVERED %s: order %s filled %d @ %.2f despite cancel — "
+                "RECOVERED %s: order %s filled %d @ %.2f despite cancel - "
                 "returning as a fill", context, order_id,
                 self.get_filled_qty(adopted), self.get_fill_price(adopted) or 0.0,
             )
@@ -206,7 +206,7 @@ class OrderManager:
             logger.error("find_recent_close_fill failed for %s: %s", symbol, e)
         return None
 
-    # ── Exit ──────────────────────────────────────────────────────────────────
+    # -- Exit ------------------------------------------------------------------
 
     async def close_position(
         self,
@@ -217,7 +217,7 @@ class OrderManager:
         Close an existing long via Alpaca's close_position endpoint.
         Works where submit_order(SELL) fails with margin errors.
         Returns the filled (or partially filled) Order, or None on failure.
-        The CALLER decides what a None means — nothing here pretends a
+        The CALLER decides what a None means - nothing here pretends a
         failed close succeeded.
         """
         try:
@@ -233,16 +233,16 @@ class OrderManager:
         order_id = str(order.id)
         filled = await self._wait_for_fill(order_id)
         if filled is None:
-            # A close is a market order — a timeout here means something is
+            # A close is a market order - a timeout here means something is
             # genuinely wrong. Re-check once for a late/partial fill before
             # reporting failure; do NOT cancel a market close blindly.
             filled = await self._recheck_fill(order_id, context="close-timeout")
         return filled
 
-    # ── Position polling ──────────────────────────────────────────────────────
+    # -- Position polling ------------------------------------------------------
 
     def get_open_positions(self) -> list:
-        """Synchronous REST fetch — use only from startup/sync contexts."""
+        """Synchronous REST fetch - use only from startup/sync contexts."""
         try:
             return self._client.get_all_positions()
         except Exception as e:
@@ -257,7 +257,7 @@ class OrderManager:
             logger.debug("get_open_positions_async failed: %s", e)
             return []
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # -- Helpers ---------------------------------------------------------------
 
     async def _wait_for_fill(self, order_id: str) -> Optional[Order]:
         """
@@ -297,7 +297,7 @@ class OrderManager:
                     adopted = self._adoptable(order)
                     if adopted is not None:
                         logger.warning(
-                            "Order %s terminal (%s) with PARTIAL fill %d @ %.2f — adopting",
+                            "Order %s terminal (%s) with PARTIAL fill %d @ %.2f - adopting",
                             order_id, order.status, self.get_filled_qty(adopted),
                             self.get_fill_price(adopted) or 0.0,
                         )
@@ -318,24 +318,24 @@ class OrderManager:
     def emergency_close_sync(self, symbol: str, qty: int) -> Optional[str]:
         """Synchronous market close for halt paths that run BEFORE the event
         loop exists (restart-storm brake). Submits and returns the order id
-        WITHOUT waiting for the fill — the process is halting; the nightly
+        WITHOUT waiting for the fill - the process is halting; the nightly
         reconciliation and the broker's own record are the confirmation."""
         try:
             order = self._client.close_position(
                 symbol, ClosePositionRequest(qty=str(qty)))
             logger.warning(
-                "EMERGENCY CLOSE submitted: %s x%d id=%s — fill NOT confirmed "
+                "EMERGENCY CLOSE submitted: %s x%d id=%s - fill NOT confirmed "
                 "locally; verify at the broker / next reconciliation",
                 symbol, qty, order.id,
             )
             return str(order.id)
         except Exception as e:
-            logger.critical("EMERGENCY CLOSE FAILED for %s x%d: %s — "
+            logger.critical("EMERGENCY CLOSE FAILED for %s x%d: %s - "
                             "*** CLOSE MANUALLY AT THE BROKER ***", symbol, qty, e)
             return None
 
     def cancel_all_options(self):
-        """Cancel this bot's open option orders (synchronous — startup/shutdown
+        """Cancel this bot's open option orders (synchronous - startup/shutdown
         paths only). Scoped to the configured underlying so a shared account's
         other option orders are never touched."""
         try:
@@ -356,7 +356,7 @@ class OrderManager:
 
     @staticmethod
     def get_fill_price(order: Optional[Order]) -> Optional[float]:
-        """Average fill price, or None when unknown. Callers MUST handle None —
+        """Average fill price, or None when unknown. Callers MUST handle None -
         the old 0.0 fallback silently booked a 100% loss into the CSV."""
         if order is None:
             return None

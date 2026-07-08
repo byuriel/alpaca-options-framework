@@ -1,5 +1,5 @@
 """
-SPY momentum engine — consumes 1-min bars from the stock stream.
+SPY momentum engine - consumes 1-min bars from the stock stream.
 
 Tracks:
   - Rolling 5-bar and 20-bar EMA
@@ -8,7 +8,7 @@ Tracks:
   - Consecutive green / red bar count
 
 Exposes:
-  MomentumState.direction  →  "bull" | "bear" | "neutral"
+  MomentumState.direction  ->  "bull" | "bear" | "neutral"
 """
 
 from collections import deque
@@ -60,12 +60,12 @@ class MomentumEngine:
         self.state = MomentumState()
 
     def _reset_session(self, date: datetime.date):
-        # VWAP is session-specific — always reset
+        # VWAP is session-specific - always reset
         self._cum_tp_vol   = 0.0
         self._cum_vol      = 0.0
         self._session_date = date
-        # Consecutive bar counts are session-specific — reset
-        # EMAs are intentionally NOT reset — they are continuous across sessions
+        # Consecutive bar counts are session-specific - reset
+        # EMAs are intentionally NOT reset - they are continuous across sessions
         # and must carry forward so they're warm at market open
         self._bars.clear()
         self.state = MomentumState(
@@ -83,7 +83,7 @@ class MomentumEngine:
         """
         Feed historical bars through the engine to warm up EMAs before market open.
         Call once at startup with the last 30 1-min bars from yesterday's session.
-        Direction signal is ignored during preseed — only EMA state matters.
+        Direction signal is ignored during preseed - only EMA state matters.
         """
         logger.info("Pre-seeding momentum engine with %d historical bars...", len(bars))
         for bar in bars:
@@ -99,7 +99,7 @@ class MomentumEngine:
 
         # Premarket / after-hours bars: EMAs are continuous indicators and
         # keep updating, but VWAP, streaks, ROC and atr5 are RTH-session
-        # statistics — thin extended-hours prints must not contaminate them.
+        # statistics - thin extended-hours prints must not contaminate them.
         # (The session therefore effectively resets at 09:30, as documented,
         # not at the first premarket bar of the new date.)
         if not (market_calendar.ET_OPEN <= bar_et.time() < market_calendar.ET_REGULAR_CLOSE):

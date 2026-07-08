@@ -1,18 +1,18 @@
 """
-FuturesSimBroker — linear fills for the ES sibling, with the same "never
+FuturesSimBroker - linear fills for the ES sibling, with the same "never
 flatter yourself" fill philosophy as sim_broker.py on the options side.
 
-Fill rules (all conservative, all swept in sensitivity analysis, plan §8):
+Fill rules (all conservative, all swept in sensitivity analysis, plan Sec.8):
   entry:  marketable order modeled at bar close + ES_ENTRY_SLIP_TICKS adverse
   stop:   fills THROUGH the stop by ES_STOP_SLIP_TICKS when the bar's range
-          touches it (low ≤ stop for longs) — stops are resting orders live,
+          touches it (low <= stop for longs) - stops are resting orders live,
           so they fill intrabar, not at the close
   target: resting limit; fills at the limit ONLY if the bar trades THROUGH
-          it (high ≥ target + one tick for longs) — a touch is never assumed
+          it (high >= target + one tick for longs) - a touch is never assumed
           to fill
   both in one bar: STOP FIRST. Intrabar ordering is unknowable from bars;
           the pessimistic ordering is the only defensible default.
-  soft exits (trail/stagnation/time/event): fill at bar close + slip —
+  soft exits (trail/stagnation/time/event): fill at bar close + slip -
           these are close-evaluated decisions executed with a market order.
 
 Commissions: all-in per side per contract (config.ES_COMMISSION_PER_SIDE),
@@ -40,7 +40,7 @@ class FuturesSimBroker:
         self.commission = (commission_per_side if commission_per_side is not None
                            else config.ES_COMMISSION_PER_SIDE[root])
 
-    # ── Fills ──────────────────────────────────────────────────────────────────
+    # -- Fills ------------------------------------------------------------------
 
     def entry_fill(self, side: str, bar_close: float) -> float:
         slip = self.entry_slip * self.spec.tick_size
@@ -69,7 +69,7 @@ class FuturesSimBroker:
                 return pos.target_price, "target"
         return None
 
-    # ── Accounting ─────────────────────────────────────────────────────────────
+    # -- Accounting -------------------------------------------------------------
 
     def round_turn_commission(self, qty: int) -> float:
         return 2.0 * self.commission * qty
@@ -79,5 +79,5 @@ class FuturesSimBroker:
         return pts * self.spec.point_value * pos.qty - self.round_turn_commission(pos.qty)
 
     def unrealized_usd(self, pos: FuturesPosition, price: float) -> float:
-        """Gross mark — commissions hit at close only."""
+        """Gross mark - commissions hit at close only."""
         return pos.favorable(price) * self.spec.point_value * pos.qty

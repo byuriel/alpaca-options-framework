@@ -1,13 +1,13 @@
 """
-Async data feeds — three concurrent WebSocket streams:
-  1. StockDataStream   — 1-min SPY bars (IEX)
-  2. OptionDataStream  — real-time option quotes (indicative)
-  3. TradingStream     — real-time order/fill events
+Async data feeds - three concurrent WebSocket streams:
+  1. StockDataStream   - 1-min SPY bars (IEX)
+  2. OptionDataStream  - real-time option quotes (indicative)
+  3. TradingStream     - real-time order/fill events
 
 Option subscription is intentionally deferred until market open.
 The bot starts with no option subscriptions, waits for the first
 9:30 ET bar, then calls subscribe_options() from a separate task
-(safe — not inside the stream callback chain, no deadlock risk).
+(safe - not inside the stream callback chain, no deadlock risk).
 """
 
 import asyncio
@@ -27,14 +27,14 @@ _OPTION_FEEDS = {"indicative": OptionsFeed.INDICATIVE, "opra": OptionsFeed.OPRA}
 
 
 def stock_feed() -> DataFeed:
-    """Configured stock feed enum — single mapping point for streams AND
+    """Configured stock feed enum - single mapping point for streams AND
     historical requests, so live signals and preseed/ATR data can never
     silently come from different tapes."""
     try:
         return _STOCK_FEEDS[config.STOCK_FEED]
     except KeyError:
         raise SystemExit(
-            f"Unknown ALPACA_STOCK_FEED={config.STOCK_FEED!r} — "
+            f"Unknown ALPACA_STOCK_FEED={config.STOCK_FEED!r} - "
             f"use one of {sorted(_STOCK_FEEDS)}")
 
 
@@ -43,7 +43,7 @@ def option_feed() -> OptionsFeed:
         return _OPTION_FEEDS[config.OPTION_FEED]
     except KeyError:
         raise SystemExit(
-            f"Unknown ALPACA_OPTION_FEED={config.OPTION_FEED!r} — "
+            f"Unknown ALPACA_OPTION_FEED={config.OPTION_FEED!r} - "
             f"use one of {sorted(_OPTION_FEEDS)}")
 
 
@@ -79,7 +79,7 @@ class FeedManager:
         self._tasks: list[asyncio.Task] = []
         self._options_subscribed = False
 
-    # ── Handlers ──────────────────────────────────────────────────────────────
+    # -- Handlers --------------------------------------------------------------
 
     async def _handle_spy_bar(self, bar):
         try:
@@ -99,12 +99,12 @@ class FeedManager:
         except Exception as e:
             logger.error("trade_update handler error: %s", e)
 
-    # ── Deferred option subscription ──────────────────────────────────────────
+    # -- Deferred option subscription ------------------------------------------
 
     def subscribe_options(self, symbols: List[str]):
         """
         Subscribe to option quotes. Called once at market open from a
-        dedicated asyncio task — NOT from inside a stream callback.
+        dedicated asyncio task - NOT from inside a stream callback.
         Calling from outside the callback chain is safe (no deadlock).
         """
         if self._options_subscribed or not symbols:
@@ -116,7 +116,7 @@ class FeedManager:
     def add_option_symbols(self, symbols: List[str]):
         """
         Add more symbols to an existing option subscription (mid-session re-subscription).
-        Safe to call from any standalone asyncio task — NOT from inside a stream callback.
+        Safe to call from any standalone asyncio task - NOT from inside a stream callback.
         Alpaca deduplicates internally, so passing already-subscribed symbols is harmless.
         """
         if not symbols or not self._options_subscribed:
@@ -124,7 +124,7 @@ class FeedManager:
         self._option_stream.subscribe_quotes(self._handle_option_quote, *symbols)
         logger.info("Option quotes expanded: +%d symbols", len(symbols))
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
+    # -- Lifecycle -------------------------------------------------------------
 
     async def start(self):
         # Stock and trading streams start immediately.
@@ -132,7 +132,7 @@ class FeedManager:
         self._stock_stream.subscribe_bars(self._handle_spy_bar, config.UNDERLYING)
         self._trading_stream.subscribe_trade_updates(self._handle_trade_update)
 
-        # NOTE: _run_forever() is alpaca-py private API — the public .run() is
+        # NOTE: _run_forever() is alpaca-py private API - the public .run() is
         # blocking-sync and unusable inside an existing event loop. This is why
         # requirements.txt pins alpaca-py to a bounded range: a minor release
         # can rename this without notice. Re-test before bumping the bound.
@@ -141,7 +141,7 @@ class FeedManager:
         t3 = asyncio.create_task(self._trading_stream._run_forever(), name="trading_stream")
         self._tasks = [t1, t2, t3]
 
-        logger.info("Feeds started — awaiting market open for option subscription.")
+        logger.info("Feeds started - awaiting market open for option subscription.")
         try:
             await asyncio.gather(*self._tasks)
         except asyncio.CancelledError:

@@ -1,14 +1,14 @@
 """
-Structured decision log — everything the bot SAW AND CONSIDERED, not just
+Structured decision log - everything the bot SAW AND CONSIDERED, not just
 what it did.
 
 The diagnostic problem this solves: when performance deviates, P&L only says
 THAT the strategy changed; the decision log says WHERE in the funnel:
 
-    market conditions → signal gates → attempts/fills → realization → P&L
+    market conditions -> signal gates -> attempts/fills -> realization -> P&L
 
 Four different deaths look identical in the P&L and need four different
-responses — signals stopped firing (regime moved), gates started blocking
+responses - signals stopped firing (regime moved), gates started blocking
 (a filter went stale), fills stopped happening (execution/competition), or
 winners became losers (edge repriced). Only per-candidate gate verdicts,
 attempt records, and excursion columns distinguish them. drift_report.py is
@@ -16,19 +16,19 @@ the comparator that reads all of this.
 
 Two files per session, in config.LOG_DIR:
 
-  decisions_YYYY-MM-DD.csv.gz — one row per (bar, candidate symbol): every
-    gate's verdict (never short-circuited — see signals.GateReport), the
-    sole blocker, and the full market/momentum context. ~26 symbols × 390
-    bars ≈ 10k rows/day, a few hundred KB gzipped.
+  decisions_YYYY-MM-DD.csv.gz - one row per (bar, candidate symbol): every
+    gate's verdict (never short-circuited - see signals.GateReport), the
+    sole blocker, and the full market/momentum context. ~26 symbols x 390
+    bars ~ 10k rows/day, a few hundred KB gzipped.
 
-  attempts_YYYY-MM-DD.csv — one row per order attempt: decision price,
+  attempts_YYYY-MM-DD.csv - one row per order attempt: decision price,
     limit, outcome (filled/partial/unfilled/error), fill price, wait time.
-    Failed attempts are data, not log noise — fill-rate decay is an
+    Failed attempts are data, not log noise - fill-rate decay is an
     execution-regime change with its own fix.
 
 Because these are written from the SHARED code path (the bar handler and
 entry path that replay drives), replay emits identical decision logs into
-its output directory — so decision history is REGENERABLE for every session
+its output directory - so decision history is REGENERABLE for every session
 ever recorded. The baseline for drift analysis exists on day one.
 
 Determinism: gzip members are written with mtime=0, so the same session
@@ -69,26 +69,26 @@ ATTEMPT_COLUMNS = [
 
 
 def _f(v, nd=4):
-    """Fixed-precision float formatting — determinism requires that the same
+    """Fixed-precision float formatting - determinism requires that the same
     value always serializes to the same string."""
     return "" if v is None else f"{v:.{nd}f}"
 
 
 class DecisionLogger:
-    """Per-session writer — crash-safe BY CONSTRUCTION.
+    """Per-session writer - crash-safe BY CONSTRUCTION.
 
     Every batch (one bar's candidates) is written as a COMPLETE, self-
     terminated gzip member appended to the raw file. There is no long-lived
     compressed stream to finalize, so the bot's deliberate hard exits
     (os._exit at the time stop, watchdog execl) can never leave an
-    unterminated member that corrupts everything appended after a restart —
+    unterminated member that corrupts everything appended after a restart -
     Python's gzip reader walks concatenated members natively. The header is
     its own member, written synchronously AT CREATION, so no restart window
     can produce a header-less file. Cost: ~20 bytes of member overhead per
     bar. Worth it.
 
     Failure policy: if a batch fails to write (disk full), it is DROPPED and
-    counted — a lost bar of rows is honest; silently re-emitting it next bar
+    counted - a lost bar of rows is honest; silently re-emitting it next bar
     would double-count and skew every rate drift_report computes."""
 
     def __init__(self, log_dir: str, date_str: str):
@@ -115,9 +115,9 @@ class DecisionLogger:
             self._att_f.flush()
 
     def _write_member(self, text: str):
-        """Compress `text` as one complete gzip member (mtime=0 → byte-
+        """Compress `text` as one complete gzip member (mtime=0 -> byte-
         deterministic) and append it with a single write+flush. On failure
-        the batch is dropped and counted — never retried (see class doc)."""
+        the batch is dropped and counted - never retried (see class doc)."""
         buf = io.BytesIO()
         with gzip.GzipFile(filename="", mode="wb", fileobj=buf, mtime=0) as gz:
             gz.write(text.encode())
@@ -126,13 +126,13 @@ class DecisionLogger:
             self._raw.flush()
         except (OSError, ValueError) as e:   # ValueError: closed/broken handle
             self.dropped_batches += 1
-            logger.error("Decision batch dropped (write failed: %s) — "
+            logger.error("Decision batch dropped (write failed: %s) - "
                          "%d dropped so far", e, self.dropped_batches)
 
-    # ── Decisions (one batch per bar) ─────────────────────────────────────────
+    # -- Decisions (one batch per bar) -----------------------------------------
 
     def log_candidates(self, bar_time_et: str, rows: List[dict]):
-        """One complete gzip member per bar batch — a hard exit at ANY moment
+        """One complete gzip member per bar batch - a hard exit at ANY moment
         leaves a fully readable file."""
         buf = io.StringIO()
         w   = csv.writer(buf)
@@ -154,7 +154,7 @@ class DecisionLogger:
         if rows:
             self._write_member(buf.getvalue())
 
-    # ── Attempts ──────────────────────────────────────────────────────────────
+    # -- Attempts --------------------------------------------------------------
 
     def log_attempt(self, *, time_et: str, symbol: str, side: str,
                     qty_requested: int, decision_bid: float,
@@ -177,7 +177,7 @@ class DecisionLogger:
             pass
 
 
-# ── Readers (tolerant of hard-exit truncation, like recorder.py) ─────────────
+# -- Readers (tolerant of hard-exit truncation, like recorder.py) -------------
 
 def read_decisions(path: str) -> Iterator[dict]:
     # zlib.error is in the net: it does NOT subclass OSError, and a corrupt
@@ -187,7 +187,7 @@ def read_decisions(path: str) -> Iterator[dict]:
         with gzip.open(path, "rt", encoding="utf-8") as f:
             yield from csv.DictReader(f)
     except (EOFError, OSError, gzip.BadGzipFile, zlib.error) as e:
-        logger.warning("Decision log %s truncated tail (%s) — using intact prefix",
+        logger.warning("Decision log %s truncated tail (%s) - using intact prefix",
                        path, e)
 
 

@@ -4,7 +4,7 @@ OCC option symbol construction and parsing.
 Kept dependency-free (stdlib only) so it can be unit-tested and reused
 without importing any broker SDK.
 
-Alpaca OCC format (no space padding — the WebSocket rejects spaces):
+Alpaca OCC format (no space padding - the WebSocket rejects spaces):
     {root}{YYMMDD}{C|P}{strike * 1000:08d}
 Example: SPY260513C00560000
 """

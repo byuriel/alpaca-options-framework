@@ -4,7 +4,7 @@ Strike selection and OCC symbol construction.
 Modes:
   - startup_atr()            : fetches 5-day daily ATR once at startup (fallback baseline)
   - prime_chain_cache()      : fetches the real option chain once at startup so
-                               dynamically built symbols can be validated —
+                               dynamically built symbols can be validated -
                                subscribing to strikes that don't exist silently
                                shrinks the tradeable window
   - compute_dynamic_strikes(): called on every 1-min bar with live SPY price +
@@ -29,7 +29,7 @@ from occ import build_occ_symbol
 
 logger = logging.getLogger(__name__)
 
-# Chain symbols that actually exist, keyed by expiry — primed once at startup.
+# Chain symbols that actually exist, keyed by expiry - primed once at startup.
 # Empty set for an expiry means "validation unavailable, pass everything through"
 # (never fail closed on a data-API hiccup; Alpaca just won't stream fakes).
 _chain_cache: dict = {}
@@ -37,19 +37,19 @@ _chain_cache: dict = {}
 
 def _atr_5day(stock_client: StockHistoricalDataClient) -> float:
     end   = datetime.datetime.now(tz=config.ET)
-    start = end - datetime.timedelta(days=15)  # generous window → 5 complete days
+    start = end - datetime.timedelta(days=15)  # generous window -> 5 complete days
     req   = StockBarsRequest(
         symbol_or_symbols=config.UNDERLYING,
         timeframe=TimeFrame.Day,
         start=start,
         end=end,
         feed=stock_feed(),
-        adjustment=Adjustment.RAW,   # strike math needs UNadjusted prices —
+        adjustment=Adjustment.RAW,   # strike math needs UNadjusted prices -
                                      # split/dividend adjustment shifts prices
                                      # off the option strike grid
     )
     bars = stock_client.get_stock_bars(req)[config.UNDERLYING]
-    # Exclude today's PARTIAL bar by date, not by blind slicing — the old
+    # Exclude today's PARTIAL bar by date, not by blind slicing - the old
     # [-6:-1] silently dropped the newest complete day whenever the query
     # didn't include a today-bar (e.g. premarket starts).
     today = config.today_et()
@@ -58,7 +58,7 @@ def _atr_5day(stock_client: StockHistoricalDataClient) -> float:
     bars  = bars[-5:]
     if not bars:
         return 3.0  # fallback ATR if data unavailable
-    # True range: max(H-L, |H-prevC|, |L-prevC|) — plain H-L understates the
+    # True range: max(H-L, |H-prevC|, |L-prevC|) - plain H-L understates the
     # range on gap days, which shrinks strike offsets exactly when moves are big.
     trs = []
     prev_close = None
@@ -91,7 +91,7 @@ def _strike_window(target: float) -> list:
             for i in range(-config.STRIKE_ALTS, config.STRIKE_ALTS + 1)]
 
 
-# ── Chain validation ───────────────────────────────────────────────────────────
+# -- Chain validation -----------------------------------------------------------
 
 def prime_chain_cache(option_client: OptionHistoricalDataClient,
                       expiry: Optional[datetime.date] = None) -> int:
@@ -120,7 +120,7 @@ def prime_chain_cache(option_client: OptionHistoricalDataClient,
         logger.info("Chain cache primed: %d contracts for %s", len(existing), expiry)
     else:
         logger.warning(
-            "Chain cache EMPTY for %s — strike validation disabled, "
+            "Chain cache EMPTY for %s - strike validation disabled, "
             "dynamically built symbols pass through unfiltered.", expiry,
         )
     return len(existing)
@@ -137,7 +137,7 @@ def _filter_existing(symbols: list, expiry: datetime.date) -> list:
     return valid
 
 
-# ── Public API ─────────────────────────────────────────────────────────────────
+# -- Public API -----------------------------------------------------------------
 
 def startup_atr(stock_client: StockHistoricalDataClient) -> float:
     """
@@ -162,14 +162,14 @@ def compute_dynamic_strikes(
       {
         "call_strike":  563.50,
         "put_strike":   556.50,
-        "call_symbols": ["SPY260513C00563500", ...],   # target ± STRIKE_ALTS
+        "call_symbols": ["SPY260513C00563500", ...],   # target +/- STRIKE_ALTS
         "put_symbols":  ["SPY260513P00556500", ...],
       }
     """
     if expiry is None:
         expiry = config.today_et()
 
-    # atr is always the daily ATR baseline passed from main.py — no scaling needed.
+    # atr is always the daily ATR baseline passed from main.py - no scaling needed.
     # The 1-min live ATR from the momentum engine is intentionally NOT used here
     # because premarket and early-session 1-min ranges are too small to be meaningful
     # for daily strike offset calculation.

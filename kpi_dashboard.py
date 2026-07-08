@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SPY 0DTE bot — KPI dashboard generator.
+SPY 0DTE bot - KPI dashboard generator.
 
 Reads logs/trades_*.csv (closed trades) and logs/bot_*.log (ghost closes,
 ORB shadow filter decisions) and emits a self-contained dark-theme HTML
@@ -9,7 +9,7 @@ report to gh_dashboard/index.html, mirroring the Strat v60 dashboard.
 Usage:
     python3 kpi_dashboard.py [--days 30] [--out gh_dashboard/index.html]
 
-Only generated HTML ever goes into gh_dashboard/ — never config or keys.
+Only generated HTML ever goes into gh_dashboard/ - never config or keys.
 """
 
 import argparse
@@ -42,7 +42,7 @@ def is_artifact(r) -> bool:
     """
     Bug-artifact rows: 'time_stop' exits held under 60 seconds are force-closes
     of positions recovered after a restart (synthetic entry time, Alpaca
-    day-average cost basis) — e.g. the Jun 3/4 watchdog-cascade rows and the
+    day-average cost basis) - e.g. the Jun 3/4 watchdog-cascade rows and the
     May 27 recovered 12-lot. A genuine time-stop close holds for minutes.
     """
     hold = (r["exit_dt"] - r["entry_dt"]).total_seconds()
@@ -73,7 +73,7 @@ def load_trades(days: int):
 
 
 def load_ghosts(dates: set):
-    """Parse GHOST CLOSED events from bot logs → [{date, symbol, pnl}]."""
+    """Parse GHOST CLOSED events from bot logs -> [{date, symbol, pnl}]."""
     ghosts = []
     for path in sorted(glob.glob(os.path.join(LOG_DIR, "bot_*.log"))):
         day = os.path.basename(path)[4:14]
@@ -92,7 +92,7 @@ def load_ghosts(dates: set):
 
 
 def load_shadow(dates: set):
-    """Parse ORB_SHADOW decisions → [{date, time, decision, symbol, side, bias}]."""
+    """Parse ORB_SHADOW decisions -> [{date, time, decision, symbol, side, bias}]."""
     out = []
     for path in sorted(glob.glob(os.path.join(LOG_DIR, "bot_*.log"))):
         day = os.path.basename(path)[4:14]
@@ -142,9 +142,9 @@ def build(days: int, out_path: str):
     ghosts = load_ghosts(set(dates))
     shadow = load_shadow(set(dates))
 
-    # ── Core KPIs ────────────────────────────────────────────────────────────
+    # -- Core KPIs ------------------------------------------------------------
     pnl_total   = sum(r["realized_pnl"] for r in trades)
-    # A scratch (P&L == 0) is not a win — counting it as one inflates the
+    # A scratch (P&L == 0) is not a win - counting it as one inflates the
     # headline stat a buyer/allocator will check first.
     wins        = [r for r in trades if r["realized_pnl"] > 0]
     losses      = [r for r in trades if r["realized_pnl"] < 0]
@@ -160,7 +160,7 @@ def build(days: int, out_path: str):
     holds       = [(r["exit_dt"] - r["entry_dt"]).total_seconds() for r in trades]
     avg_hold    = sum(holds) / len(holds) / 60
 
-    # ── Daily aggregates ─────────────────────────────────────────────────────
+    # -- Daily aggregates -----------------------------------------------------
     daily = {d: {"pnl": 0.0, "n": 0, "wins": 0, "ghost": 0.0} for d in dates}
     for r in trades:
         d = daily[r["date"]]
@@ -178,7 +178,7 @@ def build(days: int, out_path: str):
 
     green_days = sum(1 for d in dates if daily[d]["pnl"] + daily[d]["ghost"] >= 0)
 
-    # ── Exit reason / side breakdowns ────────────────────────────────────────
+    # -- Exit reason / side breakdowns ----------------------------------------
     def group(key_fn):
         g = {}
         for r in trades:
@@ -191,11 +191,11 @@ def build(days: int, out_path: str):
 
     by_reason = group(lambda r: r["reason"])
     by_side   = group(lambda r: r["side"])
-    # Explicit ET — a bare astimezone() buckets by the machine's local zone,
+    # Explicit ET - a bare astimezone() buckets by the machine's local zone,
     # which shifts every hour label when the report is built on a UTC host.
     by_hour   = group(lambda r: r["entry_dt"].astimezone(ET).hour)
 
-    # ── Uncertainty quantification (trade_stats — cluster bootstrap by day) ──
+    # -- Uncertainty quantification (trade_stats - cluster bootstrap by day) --
     # A public track record that prints point estimates without confidence
     # intervals is an invitation to self-deception; the stats layer gates
     # every claim on sample size.
@@ -220,7 +220,7 @@ def build(days: int, out_path: str):
                 if boot_p is not None and ev_ci else
                 f"n={stats['n_trades']} trades / {stats['n_days']} days")
 
-    # ── ORB shadow filter panel ──────────────────────────────────────────────
+    # -- ORB shadow filter panel ----------------------------------------------
     shadow_days   = sorted({s["date"] for s in shadow})
     blocked       = []
     shadow_trades = [t for t in trades if t["date"] in shadow_days]
@@ -234,7 +234,7 @@ def build(days: int, out_path: str):
     blocked_wins  = [b for b in blocked if b["realized_pnl"] > 0]
     blocked_loss  = [b for b in blocked if b["realized_pnl"] < 0]
 
-    # ── Chart data ───────────────────────────────────────────────────────────
+    # -- Chart data -----------------------------------------------------------
     chart = {
         "dates":     dates,
         "daily_pnl": [round(daily[d]["pnl"] + daily[d]["ghost"], 2) for d in dates],
@@ -243,7 +243,7 @@ def build(days: int, out_path: str):
         "hours":     {f"{k:02d}:00": round(v["pnl"], 2) for k, v in sorted(by_hour.items())},
     }
 
-    # ── HTML ─────────────────────────────────────────────────────────────────
+    # -- HTML -----------------------------------------------------------------
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     if artifacts:
@@ -269,7 +269,7 @@ def build(days: int, out_path: str):
         card("Net P&L (actual)", fmt_usd(actual_pnl), f"{fmt_usd(pnl_total)} booked, {fmt_usd(ghost_pnl)} ghosts", pnl_cls),
         card("Trades", str(len(trades)), f"{len(wins)} W / {len(losses)} L"),
         card("Win Rate", f"{win_rate:.1f}%",
-             f"95% CI {wr_lo*100:.0f}–{wr_hi*100:.0f}% · EV {fmt_usd(ev)}",
+             f"95% CI {wr_lo*100:.0f}-{wr_hi*100:.0f}% - EV {fmt_usd(ev)}",
              "text-success" if win_rate >= 50 else "text-warning"),
         card("Profit Factor", f"{pf:.2f}", f"avg W {fmt_usd(avg_win)} / L {fmt_usd(avg_loss)}",
              "text-success" if pf >= 1.5 else "text-warning"),
@@ -295,7 +295,7 @@ def build(days: int, out_path: str):
         f"<tr><td>{d}</td><td>{daily[d]['n']}</td>"
         f"<td>{daily[d]['wins']}/{daily[d]['n']}</td>"
         f"<td class=\"{'text-success' if daily[d]['pnl']>=0 else 'text-danger'}\">{fmt_usd(daily[d]['pnl'])}</td>"
-        f"<td>{fmt_usd(daily[d]['ghost']) if daily[d]['ghost'] else '—'}</td>"
+        f"<td>{fmt_usd(daily[d]['ghost']) if daily[d]['ghost'] else '-'}</td>"
         f"<td class=\"{'text-success' if daily[d]['pnl']+daily[d]['ghost']>=0 else 'text-danger'}\">"
         f"{fmt_usd(daily[d]['pnl'] + daily[d]['ghost'])}</td></tr>"
         for d in reversed(dates)
@@ -316,7 +316,7 @@ def build(days: int, out_path: str):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SPY 0DTE — KPI Dashboard</title>
+<title>SPY 0DTE - KPI Dashboard</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
@@ -345,9 +345,9 @@ def build(days: int, out_path: str):
 <div class="container-fluid px-4 pt-4 pb-2">
   <div class="d-flex justify-content-between align-items-center mb-3">
     <div>
-      <h4 class="mb-0 fw-bold" style="color:#22d3ee;">⚡ SPY 0DTE — KPI Dashboard
+      <h4 class="mb-0 fw-bold" style="color:#22d3ee;"> SPY 0DTE - KPI Dashboard
         <span style="color:#94a3b8;font-size:0.85rem;font-weight:400;">(paper, gamma-explosion strategy)</span></h4>
-      <small class="text-muted">{dates[0]} → {dates[-1]} &nbsp;|&nbsp; {len(dates)} trading days
+      <small class="text-muted">{dates[0]} -> {dates[-1]} &nbsp;|&nbsp; {len(dates)} trading days
         &nbsp;|&nbsp; Generated {now}</small>
     </div>
   </div>
@@ -426,7 +426,7 @@ def build(days: int, out_path: str):
   <div class="text-muted pb-4" style="font-size:0.7rem;">Paper trading on Alpaca.
     Ghost events = duplicate fills recovered by the sweeper; included in actual P&L.
     Confidence intervals: cluster bootstrap by session day ({stats['n_boot']} replicates,
-    deterministic seed) — trades within a day are dependent, so days are resampled, not
+    deterministic seed) - trades within a day are dependent, so days are resampled, not
     trades. Verdict: {html.escape(stats['verdict'])}</div>
 </div>
 

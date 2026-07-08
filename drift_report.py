@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Drift report — WHERE the strategy changed, WHY it most probably changed, and
+Drift report - WHERE the strategy changed, WHY it most probably changed, and
 WHAT to do about it.
 
     python drift_report.py logs/ --recent-days 10
@@ -11,20 +11,20 @@ A log without a comparator is not a diagnostic. This reads the decision log
 splits history into BASELINE and RECENT windows, and localizes deviation to a
 layer of the funnel:
 
-  L1 market   — are candidates/conditions still arriving? (context PSI)
-  L2 signal   — are gates passing at the same rate? which gate moved?
-                (per-gate fail rates + SOLE-BLOCKER shares — the single most
+  L1 market   - are candidates/conditions still arriving? (context PSI)
+  L2 signal   - are gates passing at the same rate? which gate moved?
+                (per-gate fail rates + SOLE-BLOCKER shares - the single most
                 actionable stat: the gate that alone blocks near-misses)
-  L3 execute  — are fired signals filling at expected prices? (fill rate)
-  L4 realize  — do positions still reach profitable levels (MFE), and how
+  L3 execute  - are fired signals filling at expected prices? (fill rate)
+  L4 realize  - do positions still reach profitable levels (MFE), and how
                 much do they give back (capture)? This is the fork between
-                "edge decay — stop and redesign" and "exit tuning — replay
+                "edge decay - stop and redesign" and "exit tuning - replay
                 sweeps fix it".
-  L5 pnl      — the number everyone watches, diagnosed last because it is
+  L5 pnl      - the number everyone watches, diagnosed last because it is
                 the SUM of the layers above.
 
 Statistics match trade_stats.py's discipline: distribution shifts scored
-with PSI (deciles fit on baseline; <0.10 stable, 0.10–0.25 moderate, >0.25
+with PSI (deciles fit on baseline; <0.10 stable, 0.10-0.25 moderate, >0.25
 major), rate changes tested with two-sample by-day bootstrap (days are the
 independent unit), deterministic seed, and an insufficient-data gate that
 refuses to diagnose from noise.
@@ -51,7 +51,7 @@ PSI_MODERATE, PSI_MAJOR = 0.10, 0.25
 DEFAULT_BOOT, DEFAULT_SEED = 3000, 42
 
 
-# ── Statistics helpers ─────────────────────────────────────────────────────────
+# -- Statistics helpers ---------------------------------------------------------
 
 def psi(baseline: List[float], recent: List[float], bins: int = 10) -> Optional[float]:
     """Population Stability Index with decile bins fit on the baseline."""
@@ -87,8 +87,8 @@ def psi_categorical(baseline: List[str], recent: List[str]) -> Optional[float]:
 
 def two_sample_day_boot(base_daily: List[float], recent_daily: List[float],
                         n_boot: int, rng: random.Random):
-    """(diff, ci95, p) for recent−baseline mean of a per-day statistic.
-    Days are the resampling unit — within-day rows are dependent."""
+    """(diff, ci95, p) for recent-baseline mean of a per-day statistic.
+    Days are the resampling unit - within-day rows are dependent."""
     if len(base_daily) < 2 or len(recent_daily) < 2:
         return None
     diffs = []
@@ -108,7 +108,7 @@ def two_sample_day_boot(base_daily: List[float], recent_daily: List[float],
     }
 
 
-# ── Loading ────────────────────────────────────────────────────────────────────
+# -- Loading --------------------------------------------------------------------
 
 def _dates_from(paths_glob: str, prefix: str) -> List[str]:
     out = []
@@ -136,7 +136,7 @@ def load_window(log_dir: str, dates: List[str]) -> dict:
             "attempts": attempts, "trades": trades}
 
 
-# ── Per-window funnel metrics ──────────────────────────────────────────────────
+# -- Per-window funnel metrics --------------------------------------------------
 
 def _fl(row, key):
     try:
@@ -180,7 +180,7 @@ def summarize(win: dict) -> dict:
                              for a in att]) if att else None),
     }
 
-    # Realization layer (needs the mfe/mae columns — regenerable via replay
+    # Realization layer (needs the mfe/mae columns - regenerable via replay
     # for sessions logged before they existed)
     pnls, mfe_ratios, captures, reasons = [], [], [], []
     for t in tr:
@@ -215,7 +215,7 @@ def summarize(win: dict) -> dict:
     return s
 
 
-# ── The findings engine — ranked causes and actions ───────────────────────────
+# -- The findings engine - ranked causes and actions ---------------------------
 
 def diagnose(base: dict, rec: dict, n_boot: int, seed: int) -> List[dict]:
     rng = random.Random(seed)
@@ -225,46 +225,46 @@ def diagnose(base: dict, rec: dict, n_boot: int, seed: int) -> List[dict]:
         F.append({"severity": sev, "layer": layer, "title": title,
                   "evidence": evidence, "action": action})
 
-    # L2 — signal flow
+    # L2 - signal flow
     sig = two_sample_day_boot(base["signal_rate_daily"],
                               rec["signal_rate_daily"], n_boot, rng)
     if sig and sig["p"] < 0.05 and sig["diff"] < 0:
         moved = sorted(GATE_NAMES,
                        key=lambda g: rec["gate_fail"][g] - base["gate_fail"][g],
                        reverse=True)[:2]
-        driver = ", ".join(f"{g} fail {base['gate_fail'][g]:.1%}→{rec['gate_fail'][g]:.1%}"
+        driver = ", ".join(f"{g} fail {base['gate_fail'][g]:.1%}->{rec['gate_fail'][g]:.1%}"
                            for g in moved)
         if moved and moved[0] in ("momentum", "atr"):
-            add(1, "L2-signal", "Signal rate fell — market regime moved away from the setup",
-                f"signal rate {_mean(base['signal_rate_daily']):.2%}→"
+            add(1, "L2-signal", "Signal rate fell - market regime moved away from the setup",
+                f"signal rate {_mean(base['signal_rate_daily']):.2%}->"
                 f"{_mean(rec['signal_rate_daily']):.2%} (p={sig['p']:.3f}); driver: {driver}",
                 "Do NOT retune exits for this. Validate on replay across vol "
                 "regimes; consider a bench strategy for the current regime and "
                 "regime-conditional sizing.")
         else:
-            add(1, "L2-signal", f"Signal rate fell — gate '{moved[0]}' is the driver",
+            add(1, "L2-signal", f"Signal rate fell - gate '{moved[0]}' is the driver",
                 f"p={sig['p']:.3f}; {driver}",
                 f"Replay-sweep the '{moved[0]}' gate's threshold on recent "
                 f"recordings to quantify what relaxing it costs and buys.")
 
-    # L2 — sole-blocker surges (binding constraint changed)
+    # L2 - sole-blocker surges (binding constraint changed)
     for g in GATE_NAMES:
         b, r = base["sole_share"][g], rec["sole_share"][g]
         if r > max(2 * b, b + 0.02) and r > 0.02:
             add(2, "L2-blocker", f"'{g}' became the binding constraint",
-                f"sole-blocker share {b:.1%}→{r:.1%} — it alone now blocks "
+                f"sole-blocker share {b:.1%}->{r:.1%} - it alone now blocks "
                 f"near-miss candidates",
                 f"Replay-sweep '{g}' on the recent recording library; if the "
                 f"sweep says relaxing it is EV-positive, change it via the "
                 f"experiment ledger (--variants-tested).")
 
-    # L1/L3 — context & execution shifts
+    # L1/L3 - context & execution shifts
     ctx_labels = {"spread_pct": ("L3-execution", "Spread regime shifted",
-                                 "Execution cost changed — compare feed_monitor "
+                                 "Execution cost changed - compare feed_monitor "
                                  "reports; consider OPRA and revisit the limit-"
-                                 "pricing rule (mid×1.02)."),
+                                 "pricing rule (midx1.02)."),
                   "quote_age_s": ("L1-data", "Quote latency/age distribution shifted",
-                                  "Data-quality issue — run feed_monitor on recent "
+                                  "Data-quality issue - run feed_monitor on recent "
                                   "recordings before touching the strategy."),
                   "atr5": ("L1-market", "Volatility regime shifted",
                            "Regime, not defect. Stratify trade_stats by vol "
@@ -272,7 +272,7 @@ def diagnose(base: dict, rec: dict, n_boot: int, seed: int) -> List[dict]:
                   "abs_roc5": ("L1-market", "Momentum magnitude distribution shifted",
                                "Regime. Same action as volatility shift."),
                   "zone_dist_pct": ("L1-market", "Strike-distance geometry shifted",
-                                    "Check ATR baseline vs realized moves — the "
+                                    "Check ATR baseline vs realized moves - the "
                                     "strike offset may be mis-sized for the regime.")}
     for key, (layer, title, action) in ctx_labels.items():
         v = psi(base["context"][key], rec["context"][key])
@@ -282,42 +282,42 @@ def diagnose(base: dict, rec: dict, n_boot: int, seed: int) -> List[dict]:
                 f"PSI {v:.2f} ({'major' if v > PSI_MAJOR else 'moderate'} shift "
                 f"vs baseline deciles)", action)
 
-    # L3 — fill rate
+    # L3 - fill rate
     if base["fill_rate"] is not None and rec["fill_rate"] is not None:
         if rec["fill_rate"] < base["fill_rate"] - 0.15:
             add(1, "L3-execution", "Fill rate dropped",
-                f"fill rate {base['fill_rate']:.0%}→{rec['fill_rate']:.0%}",
+                f"fill rate {base['fill_rate']:.0%}->{rec['fill_rate']:.0%}",
                 "Execution regime: quotes moving away faster than the resting "
                 "limit. Review attempts log wait times; consider marketable "
                 "pricing; check spread PSI above.")
 
-    # L4/L5 — realization
+    # L4/L5 - realization
     if base["ev"] is not None and rec["ev"] is not None and rec["trades"] >= 10:
         ev = two_sample_day_boot(base["daily_pnl"], rec["daily_pnl"], n_boot, rng)
         if ev and ev["p"] < 0.10 and ev["diff"] < 0:
             b_mfe, r_mfe = base["mfe_ratio_median"], rec["mfe_ratio_median"]
             b_cap, r_cap = base["capture_median"], rec["capture_median"]
             if b_mfe and r_mfe is not None and r_mfe < 0.7 * b_mfe:
-                add(1, "L4-edge", "EDGE DECAY — trades no longer reach profitable levels",
+                add(1, "L4-edge", "EDGE DECAY - trades no longer reach profitable levels",
                     f"daily P&L diff ${ev['diff']:+.0f} (p={ev['p']:.3f}); "
-                    f"median MFE ratio {b_mfe:.2f}→{r_mfe:.2f}",
+                    f"median MFE ratio {b_mfe:.2f}->{r_mfe:.2f}",
                     "The pre-committed response: cut size per the kill criteria, "
                     "keep recording, re-validate on replay. Exit retuning will "
-                    "NOT fix this — the favorable excursion itself vanished. "
+                    "NOT fix this - the favorable excursion itself vanished. "
                     "Promote the best bench candidate.")
             elif b_cap and r_cap is not None and r_cap < 0.7 * b_cap:
-                add(1, "L4-exits", "GIVE-BACK — trades reach levels but exits surrender them",
+                add(1, "L4-exits", "GIVE-BACK - trades reach levels but exits surrender them",
                     f"daily P&L diff ${ev['diff']:+.0f} (p={ev['p']:.3f}); "
-                    f"MFE intact ({b_mfe}→{r_mfe}) but capture "
-                    f"{b_cap:.2f}→{r_cap:.2f}",
+                    f"MFE intact ({b_mfe}->{r_mfe}) but capture "
+                    f"{b_cap:.2f}->{r_cap:.2f}",
                     "This IS an exit-tuning problem: replay-sweep trail/TP "
                     "levels (--set PEAK_TRAIL_*, TP_MULT) on recent recordings; "
                     "quote the Bonferroni-adjusted result.")
             else:
                 add(2, "L5-pnl", "P&L deteriorated without a clean single-layer signature",
                     f"daily P&L diff ${ev['diff']:+.0f} (p={ev['p']:.3f}); "
-                    f"MFE {b_mfe}→{r_mfe}, capture {b_cap}→{r_cap}",
-                    "Mixed signature — check the L1–L3 findings above first; "
+                    f"MFE {b_mfe}->{r_mfe}, capture {b_cap}->{r_cap}",
+                    "Mixed signature - check the L1-L3 findings above first; "
                     "if none, this may be cost creep: run the slippage columns "
                     "through trade_stats and compare fees/spread paid.")
 
@@ -325,20 +325,20 @@ def diagnose(base: dict, rec: dict, n_boot: int, seed: int) -> List[dict]:
     if exit_psi is not None and exit_psi > PSI_MAJOR:
         add(3, "L4-exits", f"Exit-reason mix shifted (PSI {exit_psi:.2f})",
             "stop/trail/tp composition changed materially",
-            "Often the earliest visible symptom — read alongside MFE/capture.")
+            "Often the earliest visible symptom - read alongside MFE/capture.")
 
     F.sort(key=lambda f: f["severity"])
     return F
 
 
-# ── Report ─────────────────────────────────────────────────────────────────────
+# -- Report ---------------------------------------------------------------------
 
 def build_report(log_dir: str, baseline_days: Optional[int], recent_days: int,
                  n_boot: int = DEFAULT_BOOT, seed: int = DEFAULT_SEED) -> dict:
     dates = _dates_from(os.path.join(log_dir, "decisions_*.csv.gz"), "decisions_")
     if len(dates) < 2 * MIN_DAYS_PER_WINDOW:
         return {"verdict": (f"INSUFFICIENT DATA: {len(dates)} sessions with "
-                            f"decision logs; need ≥{2 * MIN_DAYS_PER_WINDOW}. "
+                            f"decision logs; need >={2 * MIN_DAYS_PER_WINDOW}. "
                             f"Tip: replay recorded sessions to regenerate "
                             f"decision logs for history."),
                 "dates": dates}
@@ -356,7 +356,7 @@ def build_report(log_dir: str, baseline_days: Optional[int], recent_days: int,
         "recent":   {"dates": (rec_dates[0], rec_dates[-1]), **_public(rec)},
         "findings": findings,
         "verdict": (findings[0]["title"] if findings
-                    else "NO MATERIAL DRIFT — recent window consistent with baseline"),
+                    else "NO MATERIAL DRIFT - recent window consistent with baseline"),
         "n_boot": n_boot, "seed": seed,
     }
 
@@ -368,17 +368,17 @@ def _public(s: dict) -> dict:
 
 def print_report(rep: dict):
     W = 76
-    print("═" * W)
-    print("  DRIFT REPORT — funnel-localized change detection")
-    print("═" * W)
+    print("=" * W)
+    print("  DRIFT REPORT - funnel-localized change detection")
+    print("=" * W)
     if "baseline" not in rep:
         print(f"  {rep['verdict']}")
-        print("═" * W)
+        print("=" * W)
         return
     b, r = rep["baseline"], rep["recent"]
-    print(f"  Baseline {b['dates'][0]} → {b['dates'][1]}  ({b['days']} sessions)   "
-          f"Recent {r['dates'][0]} → {r['dates'][1]}  ({r['days']} sessions)")
-    print("─" * W)
+    print(f"  Baseline {b['dates'][0]} -> {b['dates'][1]}  ({b['days']} sessions)   "
+          f"Recent {r['dates'][0]} -> {r['dates'][1]}  ({r['days']} sessions)")
+    print("-" * W)
     rows = [
         ("candidates/day", "candidates_per_day"), ("signal rate", "signal_rate"),
         ("attempts/day", "attempts_per_day"), ("fill rate", "fill_rate"),
@@ -389,21 +389,21 @@ def print_report(rep: dict):
     print(f"  {'metric':<18}{'baseline':>12}{'recent':>12}")
     for label, key in rows:
         bv, rv = b.get(key), r.get(key)
-        fmt = (lambda v: "—" if v is None else
+        fmt = (lambda v: "-" if v is None else
                (f"{v:.1%}" if "rate" in key or key == "win_rate" else f"{v}"))
         print(f"  {label:<18}{fmt(bv):>12}{fmt(rv):>12}")
-    print("─" * W)
+    print("-" * W)
     if rep["findings"]:
         print("  FINDINGS (ranked):")
         for i, f in enumerate(rep["findings"], 1):
-            sev = {1: "❗", 2: "⚠", 3: "·"}[f["severity"]]
+            sev = {1: "!", 2: "[WARN]", 3: "-"}[f["severity"]]
             print(f"  {sev} {i}. [{f['layer']}] {f['title']}")
             print(f"       evidence: {f['evidence']}")
             print(f"       action:   {f['action']}")
-    print("─" * W)
+    print("-" * W)
     print(f"  VERDICT: {rep['verdict']}")
-    print(f"  (bootstrap {rep['n_boot']}, seed {rep['seed']} — deterministic)")
-    print("═" * W)
+    print(f"  (bootstrap {rep['n_boot']}, seed {rep['seed']} - deterministic)")
+    print("=" * W)
 
 
 def main_cli():

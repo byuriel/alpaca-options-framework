@@ -1,5 +1,5 @@
 """
-Live web monitor — a read-only status page served from inside the bot.
+Live web monitor - a read-only status page served from inside the bot.
 
 Open http://127.0.0.1:8080 in any browser while the bot runs: current
 position with ticking P&L, momentum state, risk gates, kill-switch ages,
@@ -8,14 +8,14 @@ and today's trades, refreshing every 2 seconds.
 Design constraints, in order:
   1. READ-ONLY BY CONSTRUCTION. Two GET endpoints (the page and a JSON
      snapshot); every other method/path is rejected. There is no code path
-     from this module into trading state — it holds a snapshot *function*
+     from this module into trading state - it holds a snapshot *function*
      and renders whatever that returns.
   2. NEVER touches the trading path. The server runs on its own daemon
      threads (ThreadingHTTPServer); snapshot errors return an error payload
      instead of raising; a busy port disables the monitor with a warning
      instead of stopping the bot.
   3. LOCALHOST BY DEFAULT. Binds 127.0.0.1 unless MONITOR_HOST says
-     otherwise — a monitoring page on a trading process is not something to
+     otherwise - a monitoring page on a trading process is not something to
      expose to a network casually, read-only or not. MONITOR_PORT=0 disables.
   4. Stdlib only, self-contained HTML (no CDN), same rule as everything else.
 """
@@ -39,7 +39,7 @@ class MonitorServer:
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> bool:
-        """Start serving. Returns False (and logs) instead of raising —
+        """Start serving. Returns False (and logs) instead of raising -
         a busy port must never stop the bot."""
         if self.port == 0:
             return False
@@ -69,7 +69,7 @@ class MonitorServer:
                 self.wfile.write(body)
 
             def send_error(self, code, message=None, explain=None):
-                # covers non-GET methods (501 by default) — normalize to 405
+                # covers non-GET methods (501 by default) - normalize to 405
                 if code == 501:
                     code, message = 405, "read-only monitor"
                 super().send_error(code, message, explain)
@@ -81,10 +81,10 @@ class MonitorServer:
             self._httpd = ThreadingHTTPServer((self.host, self.port), Handler)
             self._httpd.daemon_threads = True
         except OSError as e:
-            logger.warning("Monitor disabled — could not bind %s:%d (%s)",
+            logger.warning("Monitor disabled - could not bind %s:%d (%s)",
                            self.host, self.port, e)
             return False
-        # port 0 → ephemeral; report the real one
+        # port 0 -> ephemeral; report the real one
         self.port = self._httpd.server_port
         self._thread = threading.Thread(
             target=self._httpd.serve_forever, daemon=True, name="monitor")
@@ -99,10 +99,10 @@ class MonitorServer:
             self._httpd = None
 
 
-# ── The page ───────────────────────────────────────────────────────────────────
+# -- The page -------------------------------------------------------------------
 # Chart-free ops monitor: stat tiles + tables, committed dark theme (this is a
 # trading-desk screen, not a document). Status colors are the validated
-# dark-surface set and never carry meaning alone — every state is also text.
+# dark-surface set and never carry meaning alone - every state is also text.
 
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -161,19 +161,19 @@ HTML_PAGE = """<!DOCTYPE html>
 <body>
 <header>
   <h1>0DTE Bot</h1>
-  <span class="chip" id="mode">…</span>
-  <span class="chip" id="feeds">…</span>
-  <span class="chip" id="clock">…</span>
-  <span id="conn">connecting…</span>
+  <span class="chip" id="mode">...</span>
+  <span class="chip" id="feeds">...</span>
+  <span class="chip" id="clock">...</span>
+  <span id="conn">connecting...</span>
 </header>
 
 <div class="tiles" id="tiles"></div>
 
-<div class="panel"><h2>Position</h2><div id="position">—</div></div>
+<div class="panel"><h2>Position</h2><div id="position">-</div></div>
 <div class="panel"><h2>Safety</h2><div class="kv" id="safety"></div></div>
-<div class="panel"><h2>Today's Trades</h2><div id="trades">—</div></div>
+<div class="panel"><h2>Today's Trades</h2><div id="trades">-</div></div>
 
-<footer>Read-only monitor — it observes the bot and cannot act on it.
+<footer>Read-only monitor - it observes the bot and cannot act on it.
 Refreshes every 2s.</footer>
 
 <script>
@@ -195,21 +195,21 @@ function render(d) {
   $("clock").textContent = d.ts_et + " ET";
 
   const m = d.spy, r = d.risk;
-  const dirTxt = {bull: "▲ BULL", bear: "▼ BEAR", neutral: "— NEUTRAL"}[m.direction] || m.direction;
+  const dirTxt = {bull: "^ BULL", bear: "v BEAR", neutral: "- NEUTRAL"}[m.direction] || m.direction;
   const gate = r.locked ? `LOCKED` : `open`;
   $("tiles").innerHTML =
-    tile("SPY", m.price ? "$" + m.price.toFixed(2) : "—", dirTxt) +
+    tile("SPY", m.price ? "$" + m.price.toFixed(2) : "-", dirTxt) +
     tile("Daily P&L", fmt$(r.daily_pnl), r.trades_today + " trades", cls$(r.daily_pnl)) +
-    tile("Week P&L", fmt$(r.week_pnl), "limit −$" + d.limits.weekly.toFixed(0), cls$(r.week_pnl)) +
+    tile("Week P&L", fmt$(r.week_pnl), "limit -$" + d.limits.weekly.toFixed(0), cls$(r.week_pnl)) +
     tile("Entry gate", gate, r.locked ? esc(r.lock_reason) :
          (r.cooldown_bars ? "cooldown " + r.cooldown_bars + " bars" : "ready"),
          r.locked ? "neg" : "pos") +
     tile("Momentum", "EMA " + m.ema5.toFixed(2) + "/" + m.ema20.toFixed(2),
-         "VWAP " + m.vwap.toFixed(2) + " · ROC " + m.roc5.toFixed(4) +
-         " · atr5 " + m.atr5.toFixed(3)) +
+         "VWAP " + m.vwap.toFixed(2) + " - ROC " + m.roc5.toFixed(4) +
+         " - atr5 " + m.atr5.toFixed(3)) +
     tile("Session", d.session.market_open ? "OPEN" : "pre-open",
-         "entries " + d.session.entry_start + "–" + d.session.entry_end +
-         " · stop " + d.session.time_stop);
+         "entries " + d.session.entry_start + "-" + d.session.entry_end +
+         " - stop " + d.session.time_stop);
 
   const p = d.position;
   if (p) {
@@ -227,21 +227,21 @@ function render(d) {
       <div>Min/Max uP&L <b class="num">${fmt$(p.min_unreal)} / ${fmt$(p.max_unreal)}</b></div>
     </div>`;
   } else {
-    $("position").innerHTML = `<span style="color:var(--text-2)">FLAT — no open position</span>`;
+    $("position").innerHTML = `<span style="color:var(--text-2)">FLAT - no open position</span>`;
   }
 
   const s = d.safety;
-  const age = (v, warnAt) => v == null ? "—"
-      : `<b class="num ${v > warnAt ? "warnc" : ""}">${v.toFixed(0)}s${v > warnAt ? " ⚠" : ""}</b>`;
+  const age = (v, warnAt) => v == null ? "-"
+      : `<b class="num ${v > warnAt ? "warnc" : ""}">${v.toFixed(0)}s${v > warnAt ? " [WARN]" : ""}</b>`;
   $("safety").innerHTML =
     `<div>Quote age ${age(s.quote_age_s, d.limits.stale_quote / 2)}</div>` +
     `<div>Bar age ${age(s.bar_age_s, 120)}</div>` +
     `<div>Entry pending <b>${s.entry_pending ? "YES" : "no"}</b></div>` +
     `<div>Exit pending <b>${s.exit_pending ? "YES" : "no"}</b></div>` +
-    `<div>Event blackout <b class="${s.blackout ? "warnc" : ""}">${s.blackout ? "⚠ " + esc(s.blackout) : "none"}</b></div>` +
+    `<div>Event blackout <b class="${s.blackout ? "warnc" : ""}">${s.blackout ? "[WARN] " + esc(s.blackout) : "none"}</b></div>` +
     `<div>Events today <b>${d.session.events.length ? esc(d.session.events.join(", ")) : "none"}</b></div>` +
     `<div>Subscribed <b class="num">${d.subs} symbols</b></div>` +
-    `<div>Recorder <b>${d.recorder.active ? (d.recorder.dropped ? "⚠ dropped " + d.recorder.dropped : "on") : "off"}</b></div>`;
+    `<div>Recorder <b>${d.recorder.active ? (d.recorder.dropped ? "[WARN] dropped " + d.recorder.dropped : "on") : "off"}</b></div>`;
 
   if (d.trades && d.trades.length) {
     $("trades").innerHTML = `<table><thead><tr>
@@ -267,7 +267,7 @@ async function tick() {
     if (d.error) { $("conn").textContent = "snapshot error: " + d.error; $("conn").className = "down"; }
     else { $("conn").textContent = "live"; $("conn").className = ""; render(d); }
   } catch (e) {
-    $("conn").textContent = "disconnected — is the bot running?";
+    $("conn").textContent = "disconnected - is the bot running?";
     $("conn").className = "down";
   }
 }

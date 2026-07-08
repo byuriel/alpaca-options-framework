@@ -1,15 +1,15 @@
 """
-NYSE trading calendar — holidays, early closes, and session-derived times.
+NYSE trading calendar - holidays, early closes, and session-derived times.
 
 A 0DTE bot MUST know the real session close for the day it is trading:
-  - On full holidays there is no session (and no 0DTE expiry) — refuse to run.
+  - On full holidays there is no session (and no 0DTE expiry) - refuse to run.
   - On early-close days (13:00 ET) a fixed 15:25 time stop never fires and a
     0DTE position is held into expiry: worthless, or ITM auto-exercise into an
     overnight share position. The time stop must be derived from the actual
     close, not hardcoded.
 
 Static tables are used instead of a dependency (pandas_market_calendars) to
-keep the framework stdlib-only. Tables cover 2025–2027; startup fails loudly
+keep the framework stdlib-only. Tables cover 2025-2027; startup fails loudly
 past the table horizon rather than guessing.
 """
 
@@ -40,7 +40,7 @@ _HOLIDAYS = {
     datetime.date(2026, 4, 3),
     datetime.date(2026, 5, 25),
     datetime.date(2026, 6, 19),
-    datetime.date(2026, 7, 3),    # July 4 falls on Saturday — observed Friday
+    datetime.date(2026, 7, 3),    # July 4 falls on Saturday - observed Friday
     datetime.date(2026, 9, 7),
     datetime.date(2026, 11, 26),
     datetime.date(2026, 12, 25),
@@ -50,11 +50,11 @@ _HOLIDAYS = {
     datetime.date(2027, 2, 15),
     datetime.date(2027, 3, 26),
     datetime.date(2027, 5, 31),
-    datetime.date(2027, 6, 18),   # Juneteenth falls Saturday — observed Friday
-    datetime.date(2027, 7, 5),    # July 4 falls Sunday — observed Monday
+    datetime.date(2027, 6, 18),   # Juneteenth falls Saturday - observed Friday
+    datetime.date(2027, 7, 5),    # July 4 falls Sunday - observed Monday
     datetime.date(2027, 9, 6),
     datetime.date(2027, 11, 25),
-    datetime.date(2027, 12, 24),  # Christmas falls Saturday — observed Friday
+    datetime.date(2027, 12, 24),  # Christmas falls Saturday - observed Friday
 }
 
 # 13:00 ET early closes.
@@ -76,7 +76,7 @@ def covers(d: datetime.date) -> bool:
 
 
 def near_horizon(d: datetime.date, days: int = 30) -> bool:
-    """True when within `days` of the table edge — startup warns the operator
+    """True when within `days` of the table edge - startup warns the operator
     to extend the tables before the bot hard-stops past the horizon."""
     horizon = datetime.date(max(_TABLE_YEARS), 12, 31)
     return (horizon - d).days <= days
@@ -85,7 +85,7 @@ def near_horizon(d: datetime.date, days: int = 30) -> bool:
 def is_trading_day(d: datetime.date) -> bool:
     if not covers(d):
         raise ValueError(
-            f"market_calendar tables do not cover {d.year} — "
+            f"market_calendar tables do not cover {d.year} - "
             f"extend _HOLIDAYS/_EARLY_CLOSES before trading."
         )
     if d.weekday() >= 5:          # Saturday/Sunday

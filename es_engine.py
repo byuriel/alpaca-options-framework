@@ -1,19 +1,19 @@
 """
-ES signal engine — the SHARED alpha layer bound to futures bars.
+ES signal engine - the SHARED alpha layer bound to futures bars.
 
 This is deliberately thin: it re-uses MomentumEngine (the exact object the
-live SPY bot runs — same EMA recursion, same VWAP anchoring, same streak
+live SPY bot runs - same EMA recursion, same VWAP anchoring, same streak
 logic) and adds only what differs on ES:
 
   - the velocity gate re-based as a FRACTION of price (config.ES_ATR5_MIN_FRAC)
     instead of absolute SPY points,
-  - the zone translation variants from plan §2.3 (default "off": the
+  - the zone translation variants from plan Sec.2.3 (default "off": the
     subscription-window analysis showed the strike/zone machinery mostly
-    selects WHICH contract, not WHETHER to trade — "grid" replicates the SPY
-    geometry ×10 as the parity control),
+    selects WHICH contract, not WHETHER to trade - "grid" replicates the SPY
+    geometry x10 as the parity control),
   - futures gate names (no premium band, no proxy delta, no option spread).
 
-Gate reports never short-circuit — identical policy to signals.GateReport,
+Gate reports never short-circuit - identical policy to signals.GateReport,
 for the same reason: per-gate statistics must not be order-dependent lies.
 
 The engine holds NO position or account state beyond what gating needs
@@ -65,7 +65,7 @@ class EsSignalEngine:
         self._last_exit_bar: Optional[int] = None
         self._session: Optional[datetime.date] = None
 
-    # ── Runner hooks ───────────────────────────────────────────────────────────
+    # -- Runner hooks -----------------------------------------------------------
 
     def set_daily_atr(self, atr5d: float):
         self.atr5d = atr5d
@@ -82,17 +82,17 @@ class EsSignalEngine:
         self.bar_index      = -1
         self._last_exit_bar = None
 
-    # ── Zone translation (plan §2.3) ───────────────────────────────────────────
+    # -- Zone translation (plan Sec.2.3) -------------------------------------------
 
     def _grid_zone(self, spot: float, direction: str):
-        """Faithful ×10 replication of the SPY machinery's observed
+        """Faithful x10 replication of the SPY machinery's observed
         semantics: 'some subscribed strike on the OTM side sits within
         ACTIVATION_PCT of spot'. Targets recompute every bar from spot and
         the daily-ATR offset, exactly like strikes.compute_dynamic_strikes;
-        the ±ES_GRID_ALTS window is the subscription window.
+        the +/-ES_GRID_ALTS window is the subscription window.
 
         atr5d is point-in-time (prior sessions only). Until the runner has
-        one full prior session the gate FAILS CLOSED — no entries on a
+        one full prior session the gate FAILS CLOSED - no entries on a
         warmup day beats entries derived from data we couldn't have had."""
         if self.atr5d is None:
             return False, None
@@ -121,7 +121,7 @@ class EsSignalEngine:
         dist = min(dists)
         return dist <= config.ACTIVATION_PCT, dist
 
-    # ── Per-bar evaluation ─────────────────────────────────────────────────────
+    # -- Per-bar evaluation -----------------------------------------------------
 
     def on_bar(self, bar: Bar, has_open_pos: bool) -> EsDecision:
         bar_et = bar.t.astimezone(config.ET)

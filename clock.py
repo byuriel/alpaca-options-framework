@@ -4,7 +4,7 @@ Single time source for every DECISION path in the bot.
 Why this exists: deterministic replay. The strategy's behavior depends on
 wall-clock reads (entry window, quote freshness, staleness ages, timestamps
 booked into the CSV). If decision code calls datetime.now()/time.monotonic()
-directly, a replayed session can never reproduce the live one — the replay
+directly, a replayed session can never reproduce the live one - the replay
 harness must be able to install a simulated clock driven by the RECORDED
 receive timestamps, so the same events produce the same decisions, fills,
 and CSV rows, byte for byte.
@@ -13,7 +13,7 @@ Rules:
   - Decision/safety code (signals, state, entry/exit paths, staleness ages)
     uses clock.now_et() / clock.monotonic() / clock.today_et().
   - Live-only plumbing (watchdog thread, status display, log formatting)
-    may keep using the real clock — it is not replayed.
+    may keep using the real clock - it is not replayed.
 
 In live mode this delegates to the real clock with zero behavioral change:
 monotonic() is time.monotonic() and now_et() is datetime.now(ET).
@@ -24,11 +24,11 @@ import time
 
 import config
 
-ET = config.ET   # one timezone definition — config owns it, clock reuses it
+ET = config.ET   # one timezone definition - config owns it, clock reuses it
 
 
 class LiveClock:
-    """Real time — the default."""
+    """Real time - the default."""
 
     def now_et(self) -> datetime.datetime:
         return datetime.datetime.now(tz=ET)
@@ -40,7 +40,7 @@ class LiveClock:
 class SimClock:
     """
     Deterministic clock for replay, advanced by the harness to each recorded
-    event's receive time (epoch seconds). monotonic() shares the same axis —
+    event's receive time (epoch seconds). monotonic() shares the same axis -
     ages and deadlines measured against it are faithful to what the live
     process experienced.
     """
@@ -49,7 +49,7 @@ class SimClock:
         self._wall = float(start_wall)
 
     def advance_to(self, wall: float):
-        """Monotonic advance only — recorded receive times can never move
+        """Monotonic advance only - recorded receive times can never move
         the clock backwards (out-of-order lines are clamped)."""
         if wall > self._wall:
             self._wall = float(wall)

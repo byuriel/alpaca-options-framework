@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Statistics layer — uncertainty-quantified performance analysis of trade logs.
+Statistics layer - uncertainty-quantified performance analysis of trade logs.
 
     python trade_stats.py logs/                              # live track record
     python trade_stats.py replay_out/session_*/              # replay outputs
@@ -11,22 +11,22 @@ Statistics layer — uncertainty-quantified performance analysis of trade logs.
 Why this exists: point estimates lie at small samples. A month of trading
 produces a win rate and an EV that are mostly noise, and a dashboard that
 prints them without confidence intervals invites (self-)deception. This
-module answers the only question that matters — "is the edge statistically
-distinguishable from zero, and with what uncertainty?" — using methods chosen
+module answers the only question that matters - "is the edge statistically
+distinguishable from zero, and with what uncertainty?" - using methods chosen
 for SMALL, DEPENDENT samples:
 
   - Cluster bootstrap BY SESSION DAY. Trades within a day share regime, so
     resampling individual trades understates variance; days are resampled
     with replacement and each carries all its trades. Deterministic (seeded).
   - Exact Student-t p-values (regularized incomplete beta, stdlib math only)
-    and Wilson score intervals for win rate — correct at n=20, not just n=500.
+    and Wilson score intervals for win rate - correct at n=20, not just n=500.
   - An explicit INSUFFICIENT-SAMPLE gate: below minimum sample the report
     says "no statistical claim possible" instead of printing a Sharpe ratio
     that is pure noise.
   - Paired comparison mode for replay sweeps: variants run on the SAME
     recorded sessions are compared on paired daily differences (far more
     power than unpaired), with a Bonferroni adjustment for the number of
-    variants tested — quoting the raw p-value of the best of 12 sweeps is
+    variants tested - quoting the raw p-value of the best of 12 sweeps is
     data mining, and this tool refuses to help you do it silently.
 
 Everything is stdlib. Bootstrap replicates default to 5000; results are
@@ -49,16 +49,16 @@ TRADING_DAYS_PER_YEAR = 252
 DEFAULT_BOOT          = 5000
 DEFAULT_SEED          = 42
 
-# Below these, no inferential claim is printed — only raw counts.
+# Below these, no inferential claim is printed - only raw counts.
 MIN_TRADES_FOR_INFERENCE = 30
 MIN_DAYS_FOR_INFERENCE   = 10
 
-# Booked by replay when a recording ends mid-position — a truncation
+# Booked by replay when a recording ends mid-position - a truncation
 # artifact, not a strategy exit. Excluded by default.
 DEFAULT_EXCLUDED_REASONS = ("replay_eof",)
 
 
-# ── Exact small-sample distributions (stdlib only) ─────────────────────────────
+# -- Exact small-sample distributions (stdlib only) -----------------------------
 
 _LANCZOS = (
     676.5203681218851, -1259.1392167224028, 771.32342877765313,
@@ -136,8 +136,8 @@ def t_two_sided_p(t: float, df: float) -> float:
 
 
 def wilson_interval(wins: int, n: int, z: float = 1.959963984540054):
-    """Wilson score 95% interval for a binomial proportion — correct at the
-    small n where the naive ±1.96·SE interval breaks down."""
+    """Wilson score 95% interval for a binomial proportion - correct at the
+    small n where the naive +/-1.96-SE interval breaks down."""
     if n == 0:
         return 0.0, 1.0
     p = wins / n
@@ -162,7 +162,7 @@ def _percentile(sorted_vals: Sequence[float], q: float) -> float:
     return sorted_vals[lo] * (1 - frac) + sorted_vals[hi] * frac
 
 
-# ── Data model ─────────────────────────────────────────────────────────────────
+# -- Data model -----------------------------------------------------------------
 
 @dataclass
 class Trade:
@@ -225,7 +225,7 @@ def _by_day(trades: Sequence[Trade]) -> Dict[str, List[float]]:
     return dict(sorted(days.items()))
 
 
-# ── Core statistics ────────────────────────────────────────────────────────────
+# -- Core statistics ------------------------------------------------------------
 
 def _mean(xs):
     return sum(xs) / len(xs) if xs else 0.0
@@ -255,7 +255,7 @@ def cluster_bootstrap(day_groups: Sequence[List[float]], stat_fn,
     """
     Resample DAYS with replacement (each carrying all its trades) and apply
     stat_fn to the pooled trade list. Respects within-day dependence; the
-    resulting intervals are wider — and more honest — than trade-level ones.
+    resulting intervals are wider - and more honest - than trade-level ones.
     """
     D = len(day_groups)
     out = []
@@ -339,14 +339,14 @@ def compute_stats(trades: Sequence[Trade], n_boot: int = DEFAULT_BOOT,
     aw, al = s["avg_win"], -s["avg_loss"]
     s["breakeven_win_rate"] = al / (aw + al) if (aw + al) > 0 else None
 
-    # Per-trade t-stat (independence caveat applies — bootstrap below is the
+    # Per-trade t-stat (independence caveat applies - bootstrap below is the
     # primary inference; this is reported because allocators ask for it)
     if sd > 0 and n >= 2:
         t = ev / (sd / math.sqrt(n))
         s["t_stat"]   = round(t, 2)
         s["t_p_value"] = t_two_sided_p(t, n - 1)
 
-    # Cluster bootstrap (by day) — primary inference on EV
+    # Cluster bootstrap (by day) - primary inference on EV
     if D >= 2:
         boot_ev = cluster_bootstrap(day_groups, _mean, n_boot, rng)
         s["ev_ci"]     = (round(_percentile(boot_ev, 0.025), 2),
@@ -391,34 +391,34 @@ def compute_stats(trades: Sequence[Trade], n_boot: int = DEFAULT_BOOT,
         for k, v in sorted(by_reason.items())
     }
 
-    # Verdict — the sample gate comes FIRST
+    # Verdict - the sample gate comes FIRST
     if not s["sufficient"]:
         s["verdict"] = (f"INSUFFICIENT SAMPLE (n={n} trades, {D} days; "
-                        f"need ≥{MIN_TRADES_FOR_INFERENCE} trades and "
-                        f"≥{MIN_DAYS_FOR_INFERENCE} days) — no statistical "
+                        f"need >={MIN_TRADES_FOR_INFERENCE} trades and "
+                        f">={MIN_DAYS_FOR_INFERENCE} days) - no statistical "
                         f"claim possible")
     else:
         p = s.get("ev_boot_p", 1.0)
         if p < 0.01 and ev > 0:
             s["verdict"] = f"STATISTICALLY SIGNIFICANT positive edge (bootstrap p={p:.4f})"
         elif p < 0.05 and ev > 0:
-            s["verdict"] = f"SUGGESTIVE positive edge (bootstrap p={p:.3f}) — not yet conclusive"
+            s["verdict"] = f"SUGGESTIVE positive edge (bootstrap p={p:.3f}) - not yet conclusive"
         elif p < 0.05 and ev < 0:
             s["verdict"] = f"STATISTICALLY SIGNIFICANT NEGATIVE edge (bootstrap p={p:.3f})"
         else:
-            s["verdict"] = (f"NO DETECTABLE EDGE (bootstrap p={p:.2f}) — "
+            s["verdict"] = (f"NO DETECTABLE EDGE (bootstrap p={p:.2f}) - "
                             f"results consistent with zero")
     return s
 
 
-# ── Paired comparison (replay sweeps) ─────────────────────────────────────────
+# -- Paired comparison (replay sweeps) -----------------------------------------
 
 def compare(base_trades: Sequence[Trade], variant_trades: Sequence[Trade],
             n_boot: int = DEFAULT_BOOT, seed: int = DEFAULT_SEED,
             variants_tested: int = 1) -> dict:
     """
     Paired comparison of two variants run on the SAME sessions (replay
-    sweeps). Inference is on paired DAILY P&L differences — pairing removes
+    sweeps). Inference is on paired DAILY P&L differences - pairing removes
     common session-level variance and is dramatically more powerful than
     comparing two independent aggregates.
 
@@ -438,7 +438,7 @@ def compare(base_trades: Sequence[Trade], variant_trades: Sequence[Trade],
         "variants_tested": variants_tested,
     }
     if not common:
-        out["verdict"] = "NO OVERLAPPING SESSIONS — nothing to compare"
+        out["verdict"] = "NO OVERLAPPING SESSIONS - nothing to compare"
         return out
 
     diffs = [var_d[d] - base_d[d] for d in common]
@@ -462,7 +462,7 @@ def compare(base_trades: Sequence[Trade], variant_trades: Sequence[Trade],
     p_adj = out.get("p_bonferroni", 1.0)
     if len(common) < MIN_DAYS_FOR_INFERENCE:
         out["verdict"] = (f"INSUFFICIENT OVERLAP ({len(common)} common days; "
-                          f"need ≥{MIN_DAYS_FOR_INFERENCE}) — direction only, "
+                          f"need >={MIN_DAYS_FOR_INFERENCE}) - direction only, "
                           f"no statistical claim")
     elif p_adj < 0.05:
         direction = "IMPROVES" if out["mean_daily_diff"] > 0 else "HURTS"
@@ -476,7 +476,7 @@ def compare(base_trades: Sequence[Trade], variant_trades: Sequence[Trade],
     return out
 
 
-# ── Report rendering ───────────────────────────────────────────────────────────
+# -- Report rendering -----------------------------------------------------------
 
 def _fmt_ci(ci, unit="$"):
     return f"[{unit}{ci[0]:+.2f}, {unit}{ci[1]:+.2f}]" if ci else "n/a"
@@ -484,25 +484,25 @@ def _fmt_ci(ci, unit="$"):
 
 def print_report(s: dict, excluded: int = 0):
     W = 74
-    print("═" * W)
-    print("  STATISTICAL REPORT — uncertainty-quantified, cluster bootstrap by day")
-    print("═" * W)
+    print("=" * W)
+    print("  STATISTICAL REPORT - uncertainty-quantified, cluster bootstrap by day")
+    print("=" * W)
     if s.get("n_trades", 0) == 0:
         print("  No trades found.")
-        print("═" * W)
+        print("=" * W)
         return
     d0, d1 = s["date_range"]
     print(f"  Sample:    {s['n_trades']} trades over {s['n_days']} sessions "
-          f"({d0} → {d1})")
+          f"({d0} -> {d1})")
     if excluded:
         print(f"             ({excluded} rows excluded: reasons {DEFAULT_EXCLUDED_REASONS})")
     print(f"  Net P&L:   ${s['net_pnl']:+.2f}   (all figures net of fees)")
-    print("─" * W)
+    print("-" * W)
     print(f"  EV/trade:  ${s['ev_per_trade']:+.2f}   "
           f"95% CI {_fmt_ci(s.get('ev_ci'))}   bootstrap p={s.get('ev_boot_p', 1):.4f}")
     if "t_stat" in s:
         print(f"             t={s['t_stat']:+.2f} (p={s['t_p_value']:.4f}, "
-              f"per-trade, independence assumed — bootstrap above is primary)")
+              f"per-trade, independence assumed - bootstrap above is primary)")
     lo, hi = s["win_rate_ci"]
     print(f"  Win rate:  {s['win_rate']*100:.1f}%   Wilson 95% CI "
           f"[{lo*100:.1f}%, {hi*100:.1f}%]")
@@ -513,7 +513,7 @@ def print_report(s: dict, excluded: int = 0):
     pf_ci = s.get("pf_ci")
     print(f"  P. factor: {s['profit_factor']}   95% CI {_fmt_ci(pf_ci, unit='') if pf_ci else 'n/a'}")
     print(f"  SQN:       {s['sqn']}   |   avg hold {s['avg_hold_min']} min")
-    print("─" * W)
+    print("-" * W)
     if "sharpe_annual" in s:
         print(f"  Sharpe (ann.):  {s['sharpe_annual']:+.2f}   "
               f"95% CI {_fmt_ci(s.get('sharpe_ci'), unit='')}")
@@ -524,50 +524,50 @@ def print_report(s: dict, excluded: int = 0):
           f"p95 ${s.get('mdd_p95', 0):.2f}")
     print(f"  Days:      {s['green_days']}/{s['n_days']} green   "
           f"best ${s['best_day']:+.2f}   worst ${s['worst_day']:+.2f}")
-    print("─" * W)
+    print("-" * W)
     print("  By exit reason:")
     for k, v in s["by_reason"].items():
-        note = "" if v["n"] >= 10 else "   (n<10 — no inference)"
+        note = "" if v["n"] >= 10 else "   (n<10 - no inference)"
         print(f"    {k:<12} n={v['n']:<4} pnl=${v['pnl']:+10.2f}  "
               f"ev=${v['ev']:+7.2f}{note}")
-    print("─" * W)
+    print("-" * W)
     print(f"  VERDICT:   {s['verdict']}")
-    print("─" * W)
+    print("-" * W)
     print("  What this report cannot tell you: fills are paper/simulated;")
     print("  one market regime; parameters chosen after seeing some of this")
     print(f"  data. Bootstrap: {s['n_boot']} replicates, seed {s['seed']} (deterministic).")
-    print("═" * W)
+    print("=" * W)
 
 
 def print_compare(c: dict):
     W = 74
-    print("═" * W)
-    print("  PAIRED COMPARISON — variant vs base on identical sessions")
-    print("═" * W)
+    print("=" * W)
+    print("  PAIRED COMPARISON - variant vs base on identical sessions")
+    print("=" * W)
     if not c.get("n_common_days"):
         print(f"  {c['verdict']}")
-        print("═" * W)
+        print("=" * W)
         return
     print(f"  Common sessions: {c['n_common_days']}"
           + (f"   (unmatched dropped: {c['unmatched_days']})" if c["unmatched_days"] else ""))
     for row in c["daily"]:
         print(f"    {row['date']}   base ${row['base']:+9.2f}   "
               f"variant ${row['variant']:+9.2f}   diff ${row['diff']:+9.2f}")
-    print("─" * W)
+    print("-" * W)
     print(f"  Mean daily diff: ${c['mean_daily_diff']:+.2f}   "
           f"95% CI {_fmt_ci(c.get('diff_ci'))}")
     print(f"  Total diff:      ${c['total_diff']:+.2f}   "
           f"days improved: {c['days_improved']}/{c['n_common_days']}")
     if "p_raw" in c:
         print(f"  p (raw):         {c['p_raw']:.4f}")
-        print(f"  p (Bonferroni ×{c['variants_tested']}): {c['p_bonferroni']:.4f}"
-              f"   ← quote THIS one for the best of a sweep")
-    print("─" * W)
+        print(f"  p (Bonferroni x{c['variants_tested']}): {c['p_bonferroni']:.4f}"
+              f"   <- quote THIS one for the best of a sweep")
+    print("-" * W)
     print(f"  VERDICT:   {c['verdict']}")
-    print("═" * W)
+    print("=" * W)
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
+# -- CLI ------------------------------------------------------------------------
 
 def main_cli():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])

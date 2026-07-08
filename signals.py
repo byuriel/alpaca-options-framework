@@ -1,5 +1,5 @@
 """
-Signal engine — combines momentum state + option quote data to decide
+Signal engine - combines momentum state + option quote data to decide
 entry / exit actions.
 
 Key concepts:
@@ -28,7 +28,7 @@ class Quote:
     bid:       float
     ask:       float
     timestamp: datetime.datetime          # exchange timestamp
-    recv_monotonic: float = 0.0           # local receive time (time.monotonic) —
+    recv_monotonic: float = 0.0           # local receive time (time.monotonic) -
                                           # drives the data-staleness kill switch;
                                           # exchange clocks can't be trusted for age
 
@@ -49,7 +49,7 @@ class Quote:
 @dataclass
 class ProxyDeltaTracker:
     """
-    Estimates delta = Δoption_price / ΔSPY_price over the last N seconds.
+    Estimates delta = deltaoption_price / deltaSPY_price over the last N seconds.
     Updated each time a new option quote arrives paired with the latest SPY price.
     """
     _prev_option_mid: Optional[float] = field(default=None, repr=False)
@@ -98,9 +98,9 @@ def _in_entry_window() -> bool:
     return config.ENTRY_START <= now_et <= config.ENTRY_END
 
 
-# ── Entry signal ──────────────────────────────────────────────────────────────
+# -- Entry signal --------------------------------------------------------------
 
-# Fixed gate order — the decision log's schema and every diagnostic report
+# Fixed gate order - the decision log's schema and every diagnostic report
 # key off these names. Strategy gates first, execution-quality gates last.
 GATE_NAMES = (
     "capacity",    # not already holding a position
@@ -122,10 +122,10 @@ _EXECUTION_GATES = ("fresh", "spread")
 @dataclass
 class GateReport:
     """
-    Verdict of EVERY entry gate for one candidate — no short-circuiting.
+    Verdict of EVERY entry gate for one candidate - no short-circuiting.
 
     Why all gates always evaluate: diagnosis. If evaluation stopped at the
-    first failure, gate-failure statistics would be order-dependent lies —
+    first failure, gate-failure statistics would be order-dependent lies -
     "momentum failures rose" could really mean "everything degraded but
     momentum is checked first". The trade decision is still the AND of all
     gates (identical semantics); only the *information* is richer.
@@ -136,7 +136,7 @@ class GateReport:
 
     @property
     def strategy_pass(self) -> bool:
-        """All strategy gates pass (execution-quality gates excluded) —
+        """All strategy gates pass (execution-quality gates excluded) -
         this is the historical check_entry() semantics."""
         return all(v for k, v in self.gates.items() if k not in _EXECUTION_GATES)
 
@@ -163,12 +163,12 @@ def evaluate_entry_gates(
     spy_price:     float,
     trades_today:  int,
     has_open_pos:  bool,
-    atr5:          float = 0.0,     # 5-bar ATR at entry bar — used for ATR gate
-    quote_age_s:   Optional[float] = None,   # None → freshness unknown, passes
+    atr5:          float = 0.0,     # 5-bar ATR at entry bar - used for ATR gate
+    quote_age_s:   Optional[float] = None,   # None -> freshness unknown, passes
 ) -> GateReport:
     """
     Evaluate ALL entry gates (strategy + execution-quality) for one
-    candidate. Pure — no logging, no side effects; the same function serves
+    candidate. Pure - no logging, no side effects; the same function serves
     the live entry path, the per-bar decision logger, and replay.
     """
     price = option_quote.mid
@@ -187,7 +187,7 @@ def evaluate_entry_gates(
         "delta_min":  proxy_tracker.proxy_delta >= config.PROXY_DELTA_MIN,
         "delta_rising": (proxy_tracker.delta_rising
                          if config.REQUIRE_DELTA_RISING else True),
-        # Execution-quality gates (previously inline in main._evaluate_entry —
+        # Execution-quality gates (previously inline in main._evaluate_entry -
         # one source of truth now):
         "fresh":      not (quote_age_s is not None
                            and quote_age_s > config.ENTRY_QUOTE_MAX_AGE_SEC),
@@ -198,7 +198,7 @@ def evaluate_entry_gates(
 
 def check_entry(**kwargs) -> bool:
     """
-    Historical boolean interface — all STRATEGY conditions satisfied.
+    Historical boolean interface - all STRATEGY conditions satisfied.
     (Execution-quality gates are applied by the entry path via the full
     GateReport.) Kept as the stable strategy-swap interface.
     """
@@ -209,5 +209,5 @@ def check_entry(**kwargs) -> bool:
 # time stop) is implemented in main.py's _evaluate_exit / _evaluate_spy_stop
 # and executed through the centralized _execute_exit path. A previous
 # check_exit() prototype here referenced config keys that were never added
-# (TARGET_1_MULT etc.) and would have crashed if called — removed rather than
+# (TARGET_1_MULT etc.) and would have crashed if called - removed rather than
 # shipped as dead code.

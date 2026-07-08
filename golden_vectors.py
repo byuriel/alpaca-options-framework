@@ -1,20 +1,20 @@
 """
-Golden vectors — the machine-checked contract between the Python oracle and
+Golden vectors - the machine-checked contract between the Python oracle and
 the C# NinjaScript port (ninjatrader/).
 
 "Do not fork the strategy" is enforced here, not by code review: the C# port
 may trade only while it reproduces these vectors. The vectors are per-bar
-snapshots of the FULL session state — indicators, every gate verdict, entry
-signals, shadow-position lifecycle, stop/target levels, sizing — emitted by
+snapshots of the FULL session state - indicators, every gate verdict, entry
+signals, shadow-position lifecycle, stop/target levels, sizing - emitted by
 the exact runner the backtests use (es_backtest.run_backtest emit_states).
 
     python golden_vectors.py generate bars.csv out/goldens [--zone grid]
     python golden_vectors.py compare  out/goldens/states_es.csv csharp_states.csv
 
-compare() checks numeric columns to a tolerance (default 1e-6 — double
+compare() checks numeric columns to a tolerance (default 1e-6 - double
 arithmetic in identical order agrees far tighter; the tolerance only absorbs
 decimal-formatting differences) and everything else byte-exact. ANY mismatch
-is a port bug by definition — there are no acceptable differences.
+is a port bug by definition - there are no acceptable differences.
 """
 
 import argparse
@@ -102,12 +102,12 @@ def main():
     else:
         mm = compare(args.golden_csv, args.candidate_csv, tol=args.tol)
         if not mm:
-            print("CONFORMANT — 0 mismatches")
+            print("CONFORMANT - 0 mismatches")
             sys.exit(0)
         for m in mm:
             print(f"row {m['row']:>6}  {m['col']:<14} "
                   f"python={m['a']!r}  candidate={m['b']!r}")
-        print(f"NOT CONFORMANT — {len(mm)} mismatch(es) shown "
+        print(f"NOT CONFORMANT - {len(mm)} mismatch(es) shown "
               f"(port may not trade until this prints CONFORMANT)")
         sys.exit(1)
 

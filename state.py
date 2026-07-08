@@ -34,15 +34,15 @@ CSV_COLUMNS = [
     "date", "symbol", "side", "strike",
     "entry_price", "exit_price", "qty", "reason",
     "realized_pnl", "entry_time", "exit_time",
-    # audit trail — reconciliation against broker statements needs order IDs;
+    # audit trail - reconciliation against broker statements needs order IDs;
     # slippage needs the decision-time quote next to the fill
     "fees", "entry_order_id", "exit_order_id",
     "entry_bid", "entry_ask", "exit_bid", "exit_ask",
     "entry_slippage", "exit_slippage", "entry_spy",
-    # excursions — the fork in the diagnostic tree. mfe (max favorable) vs
+    # excursions - the fork in the diagnostic tree. mfe (max favorable) vs
     # realized P&L distinguishes "trades stopped reaching profitable levels"
-    # (edge decay — stop and redesign) from "still reaching them but giving
-    # it back" (exit tuning — replay sweeps fix it). Dollars, per position.
+    # (edge decay - stop and redesign) from "still reaching them but giving
+    # it back" (exit tuning - replay sweeps fix it). Dollars, per position.
     "mfe_pnl", "mae_pnl", "peak_mid",
 ]
 
@@ -57,14 +57,14 @@ class Position:
     entry_time:    datetime.datetime
     order_id:      str
     qty_remaining:   int   = 0
-    peak_mid:        float = 0.0   # highest option mid seen — for peak trailing stop
+    peak_mid:        float = 0.0   # highest option mid seen - for peak trailing stop
     min_unreal_pnl:  float = 0.0   # most negative unrealized P&L seen since entry
     max_unreal_pnl:  float = 0.0   # most positive unrealized P&L seen since entry
-    entry_spy_price: float = 0.0   # SPY bar-close price at entry — for SPY-level stop
-    entry_atr5:      float = 0.0   # atr5 at entry — scales the SPY-level stop buffer
-    entry_bid:       float = 0.0   # decision-time quote — for slippage measurement
+    entry_spy_price: float = 0.0   # SPY bar-close price at entry - for SPY-level stop
+    entry_atr5:      float = 0.0   # atr5 at entry - scales the SPY-level stop buffer
+    entry_bid:       float = 0.0   # decision-time quote - for slippage measurement
     entry_ask:       float = 0.0
-    booked_pnl:      float = 0.0   # net P&L booked so far across partial exit legs —
+    booked_pnl:      float = 0.0   # net P&L booked so far across partial exit legs -
                                    # record_trade() fires ONCE per position with this
                                    # total when the last leg closes, so a position
                                    # closed in pieces is still one trade
@@ -83,7 +83,7 @@ class BotState:
         self.exit_pending: bool = False   # True while a close_position order is in-flight
         self.entry_pending: bool = False  # True from entry decision until the position is
                                           # fully tracked locally (NOT just until the order
-                                          # returns) — blocks concurrent entries AND tells
+                                          # returns) - blocks concurrent entries AND tells
                                           # the ghost sweeper a fill may exist on Alpaca
                                           # that local state doesn't know about yet
 
@@ -98,7 +98,7 @@ class BotState:
         self._log_path = os.path.join(config.LOG_DIR, f"trades_{today}.csv")
         self._ensure_log()
 
-    # ── Quote helpers ─────────────────────────────────────────────────────────
+    # -- Quote helpers ---------------------------------------------------------
 
     def update_option_quote(self, symbol: str, bid: float, ask: float, ts: datetime.datetime):
         quote = Quote(
@@ -117,7 +117,7 @@ class BotState:
     def get_tracker(self, symbol: str) -> ProxyDeltaTracker:
         return self.delta_trackers.setdefault(symbol, ProxyDeltaTracker())
 
-    # ── Position helpers ──────────────────────────────────────────────────────
+    # -- Position helpers ------------------------------------------------------
 
     def open_position(self, pos: Position):
         if self.position is not None:
@@ -138,7 +138,7 @@ class BotState:
     ) -> float:
         """
         Book a CONFIRMED exit fill (full or partial) and update tracking.
-        Only call this with a real fill price — a failed close must keep the
+        Only call this with a real fill price - a failed close must keep the
         position tracked and retry, never book a guess into the permanent
         record. A partial fill decrements qty_remaining and keeps the
         position open; the last fill clears it. Returns P&L net of fees.
@@ -172,7 +172,7 @@ class BotState:
         )
         return realized_pnl
 
-    # ── Position persistence (restart recovery) ───────────────────────────────
+    # -- Position persistence (restart recovery) -------------------------------
 
     def _persist_position(self):
         """Write position metadata to disk so a restart recovers the real
@@ -200,7 +200,7 @@ class BotState:
             tmp = POSITION_STATE_FILE + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(payload, f)
-            os.replace(tmp, POSITION_STATE_FILE)   # atomic — no torn state file
+            os.replace(tmp, POSITION_STATE_FILE)   # atomic - no torn state file
         except OSError as e:
             logger.warning("Could not persist position state: %s", e)
 
@@ -215,7 +215,7 @@ class BotState:
     @staticmethod
     def load_persisted_position() -> Optional[dict]:
         """Read persisted position metadata, if any. The caller must still
-        cross-check against Alpaca REST — the broker is authoritative for
+        cross-check against Alpaca REST - the broker is authoritative for
         WHETHER a position exists; the state file is authoritative for its
         entry context."""
         try:
@@ -224,10 +224,10 @@ class BotState:
         except FileNotFoundError:
             return None
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Position state file unreadable (%s) — ignoring.", e)
+            logger.warning("Position state file unreadable (%s) - ignoring.", e)
             return None
 
-    # ── Logging ───────────────────────────────────────────────────────────────
+    # -- Logging ---------------------------------------------------------------
 
     def _ensure_log(self):
         os.makedirs(config.LOG_DIR, exist_ok=True)

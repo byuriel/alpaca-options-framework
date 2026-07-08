@@ -1,5 +1,5 @@
 """
-Apex Trader Funding 50K account model — the risk geometry of the ACCOUNT,
+Apex Trader Funding 50K account model - the risk geometry of the ACCOUNT,
 not just the trade.
 
 Why this module exists: on a funded prop account the binding constraint is
@@ -13,22 +13,22 @@ and exit logic must respect:
   2. An open winner that spikes and retraces PERMANENTLY consumes headroom:
      the threshold ratcheted up under the unrealized peak even though no
      profit was banked. Give-back is not free the way it is on a personal
-     account — this model meters it (`unrealized_consumption`) so the exit
+     account - this model meters it (`unrealized_consumption`) so the exit
      sweep can price trail looseness correctly.
 
 Rules encoded (verified against Apex's published rules, July 2026):
-  - trailing threshold: min(peak_equity − DD, start + $100), monotonic up
-  - breach: equity touches/crosses threshold → account fails
-  - contract scaling: HALF the plan max until EOD balance ≥ start + DD +
+  - trailing threshold: min(peak_equity - DD, start + $100), monotonic up
+  - breach: equity touches/crosses threshold -> account fails
+  - contract scaling: HALF the plan max until EOD balance >= start + DD +
     $100 ($52,600 on 50K); unlocks permanently once reached
-  - consistency (soft): best day ≤ 50% of total profit at payout request —
+  - consistency (soft): best day <= 50% of total profit at payout request -
     violating delays payout, it does not breach the account
   - every order must carry an attached stop (enforced broker-side since
-    March 2026) — sizing therefore REQUIRES a stop distance; there is no
+    March 2026) - sizing therefore REQUIRES a stop distance; there is no
     "size first, stop later" path, by construction.
 
 Nothing here rounds a fractional contract up. floor() means a stop too wide
-for the budget yields qty 0 — a skipped trade, same rule as risk.size_trade.
+for the budget yields qty 0 - a skipped trade, same rule as risk.size_trade.
 """
 
 import logging
@@ -72,13 +72,13 @@ class ApexAccount:
             threshold   = self.start - self.dd,
         )
 
-    # ── Threshold mechanics ────────────────────────────────────────────────────
+    # -- Threshold mechanics ----------------------------------------------------
 
     def _threshold_for_peak(self, peak: float) -> float:
         return min(peak - self.dd, self.start + self.lock)
 
     def mark_equity(self, equity: float) -> bool:
-        """Feed EVERY equity mark through here — bar closes AND intrabar
+        """Feed EVERY equity mark through here - bar closes AND intrabar
         favorable excursions while holding. Returns True on breach.
 
         The unrealized-consumption meter: any threshold rise that happens
@@ -108,11 +108,11 @@ class ApexAccount:
         if (config.APEX_HALF_UNTIL_NET
                 and self.s.balance >= self.start + self.dd + self.lock):
             if not self.s.scaling_unlocked:
-                logger.info("Apex safety net reached (EOD balance %.2f) — "
+                logger.info("Apex safety net reached (EOD balance %.2f) - "
                             "full contract size unlocked", self.s.balance)
             self.s.scaling_unlocked = True
 
-    # ── Derived quantities ─────────────────────────────────────────────────────
+    # -- Derived quantities -----------------------------------------------------
 
     def headroom(self, equity: Optional[float] = None) -> float:
         eq = self.s.balance if equity is None else equity
@@ -124,11 +124,11 @@ class ApexAccount:
             cap = cap // 2
         return cap
 
-    # ── Sizing (requires a stop — no stop, no size, by construction) ──────────
+    # -- Sizing (requires a stop - no stop, no size, by construction) ----------
 
     def size_trade(self, stop_ticks: int, spec: ContractSpec,
                    equity: Optional[float] = None) -> int:
-        """floor(min(fixed budget, frac × headroom) / $-risk-per-contract),
+        """floor(min(fixed budget, frac x headroom) / $-risk-per-contract),
         capped by the scaling rule. 0 = skip (never round up)."""
         if self.s.breached or stop_ticks <= 0:
             return 0
@@ -138,7 +138,7 @@ class ApexAccount:
         qty = math.floor(budget / per_contract) if per_contract > 0 else 0
         return max(0, min(qty, self.contracts_cap(spec)))
 
-    # ── Prospective loss gates (same philosophy as risk.py: gate BEFORE) ──────
+    # -- Prospective loss gates (same philosophy as risk.py: gate BEFORE) ------
 
     def daily_loss_limit(self) -> float:
         return min(config.APEX_DAILY_LOSS_CAP,
@@ -159,7 +159,7 @@ class ApexAccount:
             return False
         return True
 
-    # ── Consistency rule (soft: payout eligibility, not account survival) ─────
+    # -- Consistency rule (soft: payout eligibility, not account survival) -----
 
     @staticmethod
     def consistency_ok(day_pnls: List[float],
@@ -175,7 +175,7 @@ class ApexAccount:
     def soft_daily_profit_cap(total_prior_profit: float,
                               pct: Optional[float] = None) -> float:
         """Largest profit today that keeps the consistency rule satisfied:
-        d ≤ pct·(P + d)  →  d ≤ pct·P/(1−pct). At 50% that is simply P —
+        d <= pct-(P + d)  ->  d <= pct-P/(1-pct). At 50% that is simply P -
         never make more in one day than everything banked before it."""
         pct = config.APEX_CONSISTENCY_PCT if pct is None else pct
         if total_prior_profit <= 0 or pct >= 1.0:

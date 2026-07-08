@@ -1,19 +1,19 @@
 """
-ES exit engine — the premium-space exit stack re-derived in PRICE space.
+ES exit engine - the premium-space exit stack re-derived in PRICE space.
 
-Nothing implicit survives the port (plan §3). The options position carried
+Nothing implicit survives the port (plan Sec.3). The options position carried
 four implicit protections; each gets an explicit price-space replacement:
 
-  premium = max loss        →  resting stop at entry ∓ max(0.75×atr5, floor)
-  theta bleeds dead trades  →  stagnation exit: no excursion after N bars
-  expiry ends the trade     →  time stop 15:25 ET (unchanged)
-  TP/trail on option mid    →  ATR-multiple target + excursion trail
+  premium = max loss        ->  resting stop at entry -/+ max(0.75xatr5, floor)
+  theta bleeds dead trades  ->  stagnation exit: no excursion after N bars
+  expiry ends the trade     ->  time stop 15:25 ET (unchanged)
+  TP/trail on option mid    ->  ATR-multiple target + excursion trail
 
 Two evaluation surfaces, matching how live vs sim actually execute:
   - stop/target are HARD levels: live they are resting broker-side orders
     (Apex requires an attached stop on every order anyway); in the sim they
     fill intrabar (futures_sim owns the conservative ordering rule).
-  - trail / stagnation / time are SOFT rules evaluated on bar close — live
+  - trail / stagnation / time are SOFT rules evaluated on bar close - live
     they are alerts the trader acts on; sim fills them at the close.
 
 All functions are pure; FuturesPosition carries the little state there is.
@@ -57,13 +57,13 @@ class FuturesPosition:
     side:        str            # "long" | "short"
     entry_price: float
     qty:         int
-    atr5_entry:  float          # 1-min atr5 at entry — freezes the exit geometry
+    atr5_entry:  float          # 1-min atr5 at entry - freezes the exit geometry
     entry_time:  datetime.datetime
     stop_price:   float = 0.0   # set at open from stop_distance()
     target_price: float = 0.0
     # runtime
-    peak_favorable: float = 0.0     # best favorable excursion, points, ≥ 0
-    mae_points:     float = 0.0     # worst adverse excursion, points, ≥ 0
+    peak_favorable: float = 0.0     # best favorable excursion, points, >= 0
+    mae_points:     float = 0.0     # worst adverse excursion, points, >= 0
     bars_held:      int   = 0
 
     def favorable(self, price: float) -> float:
@@ -71,7 +71,7 @@ class FuturesPosition:
         return d if self.side == "long" else -d
 
     def update_on_bar(self, high: float, low: float, close: float):
-        """Excursion bookkeeping from the bar's extremes — MFE/MAE feed the
+        """Excursion bookkeeping from the bar's extremes - MFE/MAE feed the
         drift report's L4 fork exactly as they do on the options side."""
         hi_fav = self.favorable(high)
         lo_fav = self.favorable(low)
@@ -80,7 +80,7 @@ class FuturesPosition:
         self.bars_held     += 1
 
 
-# ── Hard levels (resting orders live; intrabar fills in sim) ──────────────────
+# -- Hard levels (resting orders live; intrabar fills in sim) ------------------
 
 def stop_distance(atr5: float, p: ExitParams) -> float:
     return max(p.stop_atr_mult * atr5, p.stop_floor_pts)
@@ -97,14 +97,14 @@ def target_price(side: str, entry: float, atr5: float, p: ExitParams) -> float:
     return round_to_tick(entry + d if side == "long" else entry - d)
 
 
-# ── Soft rules (bar-close evaluation; alerts live, close-fills in sim) ────────
+# -- Soft rules (bar-close evaluation; alerts live, close-fills in sim) --------
 
 def soft_exit_reason(pos: FuturesPosition, close: float,
                      bar_time_et: datetime.time,
                      p: ExitParams) -> Optional[str]:
     """Priority order mirrors the options stack: the time stop outranks
     everything; trail before stagnation (an armed trail means the trade
-    worked — stagnation is for trades that never went anywhere)."""
+    worked - stagnation is for trades that never went anywhere)."""
     hh, mm = map(int, p.time_stop.split(":"))
     if bar_time_et >= datetime.time(hh, mm):
         return "time_stop"
