@@ -1,4 +1,4 @@
-# check_conformance.ps1 — the gate between the Python oracle and the C# port.
+# check_conformance.ps1 - the gate between the Python oracle and the C# port.
 #
 # Compiles AofCore.cs + AofGoldenRunner.cs with the .NET Framework compiler
 # that ships with every Windows install (no Visual Studio needed), runs the
@@ -28,7 +28,7 @@ if (-not (Test-Path $csc)) {
     $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe"
 }
 if (-not (Test-Path $csc)) {
-    Write-Error ".NET Framework csc.exe not found — install .NET Framework 4.8"
+    Write-Error ".NET Framework csc.exe not found - install .NET Framework 4.8"
 }
 
 $outDir = Join-Path $here "bin"

@@ -6,7 +6,7 @@
 .DESCRIPTION
   Creates a scheduled task that launches run_session.py (the daily supervisor)
   each weekday. The supervisor handles the trading day / holiday gate, runs the
-  bot for the session, and runs reconcile + feed-monitor after the close — so
+  bot for the session, and runs reconcile + feed-monitor after the close - so
   the only thing this task does is fire once a morning.
 
   The trigger time is computed as the LOCAL-clock equivalent of the requested
@@ -41,7 +41,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot     # repo root (this script lives in windows\)
 
-# ── Resolve the Python interpreter ────────────────────────────────────────────
+# -- Resolve the Python interpreter --------------------------------------------
 if (-not $Python) {
   $venv = Join-Path $Root ".venv\Scripts\python.exe"
   if (Test-Path $venv) { $Python = $venv }
@@ -53,10 +53,10 @@ if (-not $Python) {
 }
 if (-not (Test-Path $Python)) { throw "Python not found at: $Python" }
 if (-not (Test-Path (Join-Path $Root "run_session.py"))) {
-  throw "run_session.py not found in $Root — run this from the repo's windows\ folder."
+  throw "run_session.py not found in $Root - run this from the repo's windows\ folder."
 }
 
-# ── Compute the local-clock trigger from the requested ET time ────────────────
+# -- Compute the local-clock trigger from the requested ET time ----------------
 $parts = $AtET.Split(":")
 if ($parts.Count -ne 2) { throw "AtET must be HH:mm, got '$AtET'." }
 $etz   = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
@@ -67,7 +67,7 @@ $utc      = [System.TimeZoneInfo]::ConvertTimeToUtc($etWall, $etz)
 $localFire = $utc.ToLocalTime()
 $AtLocal   = $localFire.ToString("HH:mm")
 
-# ── Build the task ────────────────────────────────────────────────────────────
+# -- Build the task ------------------------------------------------------------
 $action = New-ScheduledTaskAction -Execute $Python `
   -Argument "run_session.py" -WorkingDirectory $Root
 
@@ -80,7 +80,7 @@ $trigger = New-ScheduledTaskTrigger -Weekly `
 # WakeToRun: wake a sleeping machine. Battery flags: a laptop must not skip.
 # IgnoreNew: never run two sessions at once.
 # No restart-on-failure is configured (the default): the bot exits
-#   intentionally at 15:25, and Task Scheduler must NOT relaunch it — the
+#   intentionally at 15:25, and Task Scheduler must NOT relaunch it - the
 #   supervisor owns any in-session relaunch itself.
 $settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable -WakeToRun `
@@ -101,7 +101,7 @@ try {
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
   -Settings $settings -Principal $principal -Force | Out-Null
 
-# ── Report ────────────────────────────────────────────────────────────────────
+# -- Report --------------------------------------------------------------------
 $localTz = [System.TimeZoneInfo]::Local.Id
 Write-Host ""
 Write-Host "Registered scheduled task '$TaskName'." -ForegroundColor Green
