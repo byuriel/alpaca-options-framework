@@ -354,6 +354,17 @@ counts), delivered off the event loop, flushed before every hard-exit path
 so the last alert escapes. A machine that flattens at 11:00 and says
 nothing until you read the terminal is not an unattended system.
 
+**Daily results webhook** (`daily_summary.py`) — a separate, guaranteed
+end-of-day message: trades, win/loss/scratch split, win rate, gross/net
+P&L, best/worst trade, exit-reason breakdown. Reuses `ALERT_WEBHOOK_URL`
+by default (one webhook covers both channels), or set
+`DAILY_SUMMARY_WEBHOOK_URL` to route it elsewhere (e.g. a separate
+`#results` channel). Runs automatically as the last step of
+`run_session.py`'s post-session audit — no setup beyond the env var. On
+purpose, it still sends on a **0-trade day**: silence here would be
+indistinguishable from the supervisor never having run at all. Run it by
+hand for any past day: `python daily_summary.py --date 2026-07-08`.
+
 ---
 
 ## Decision Log & Drift Report — When the Strategy Deviates, Know WHY

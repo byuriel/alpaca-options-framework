@@ -130,6 +130,10 @@ def _post_session():
         logger.info("No recording at %s - skipping feed monitor "
                     "(session may not have opened).", rec)
 
+    # Daily results webhook - runs regardless of trade count (0 trades is
+    # still a result, and its own confirmation the supervisor ran at all).
+    _tool("daily_summary.py", ["daily_summary.py"])
+
 
 def main() -> int:
     _setup_logging()
