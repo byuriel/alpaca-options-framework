@@ -77,6 +77,14 @@ class TestGateReport:
 
 
 class TestDecisionLoggerFiles:
+    @pytest.fixture(autouse=True)
+    def _open_window(self, monkeypatch):
+        # the "window" gate reads the real wall clock; without pinning it,
+        # all_pass is only true when the suite happens to run inside
+        # 09:45-14:30 ET. Force it open so these file-format assertions are
+        # deterministic at any hour.
+        monkeypatch.setattr(signals, "_in_entry_window", lambda: True)
+
     def _row(self, sym="SPY260706C00627000", **over):
         r = evaluate_entry_gates(**_kwargs())
         d = {"symbol": sym, "side": "call", "strike": 627.0, "spy": 625.7,

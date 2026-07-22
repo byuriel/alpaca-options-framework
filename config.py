@@ -225,12 +225,19 @@ RECORDINGS_DIR     = "recordings"
 # shared code path, so replay regenerates it for any recorded session.
 DECISION_LOG = True
 
-# -- Live web monitor -----------------------------------------------------------
-# Read-only status page served from inside the bot (monitor.py). Binds
-# localhost only by default - a monitoring page on a trading process is not
-# something to expose to a network casually. MONITOR_PORT=0 disables.
+# -- Web monitor + dashboard ----------------------------------------------------
+# TWO read-only pages, both localhost-only:
+#   dashboard.py (8080) - ALWAYS-ON. Runs as its own process, reads results
+#     from disk, works whether or not the bot is trading. This is the URL to
+#     bookmark: http://127.0.0.1:8080
+#   monitor.py (8081) - the LIVE ticking view, served from inside the bot;
+#     exists only while the bot runs. On 8081 so it never clashes with the
+#     always-on dashboard when both are up. MONITOR_PORT=0 disables it.
 MONITOR_HOST = os.environ.get("MONITOR_HOST", "127.0.0.1")
-MONITOR_PORT = int(os.environ.get("MONITOR_PORT", "8080") or 0)
+MONITOR_PORT = int(os.environ.get("MONITOR_PORT", "8081") or 0)
+
+DASHBOARD_HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8080") or 0)
 
 # -- Polling --------------------------------------------------------------------
 SNAPSHOT_POLL_SEC  = 30    # how often to poll REST snapshot for proxy-delta calc

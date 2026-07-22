@@ -111,7 +111,8 @@ alpaca-options-framework/
 │                     exit failures, reconciliation mismatches
 ├── run_session.py  Daily supervisor — ET gate, runs the bot + auto reconcile/monitor
 ├── windows/        Task Scheduler install/uninstall (hands-off Windows) — see WINDOWS.md
-├── monitor.py      Live web monitor — read-only browser status page (localhost)
+├── dashboard.py    Always-on dashboard — cumulative results, works when bot is off
+├── monitor.py      Live ticking monitor — read-only, served from inside the bot
 ├── orb_filter.py   Clock-hour ORB directional regime filter (shadow mode)
 ├── kpi_dashboard.py  Self-contained HTML KPI report generator (see below)
 ├── tests/          Unit + async integration + replay-determinism tests
@@ -179,15 +180,27 @@ The bot waits for 9:30 ET, subscribes options at the actual open price, and beco
 - `r + Enter` — restart (leaves positions open, recovers on next start)
 - `t + Enter` — print today's trade table
 
-**Live web monitor:** while the bot runs, open **http://127.0.0.1:8080** in
-any browser — position with ticking unrealized P&L, momentum state, risk
-gates, kill-switch ages, event blackouts, and today's trades, refreshing
-every 2 seconds. **Read-only by construction** (two GET endpoints, every
-write method rejected — it observes the bot and cannot act on it), served
-from a daemon thread that never touches the trading path, bound to
-localhost only by default (`MONITOR_HOST`/`MONITOR_PORT` in `.env`;
-`MONITOR_PORT=0` disables). Stdlib and self-contained — no dependencies,
-no CDN.
+**Always-on dashboard:** open **http://127.0.0.1:8080** any time —
+`dashboard.py` runs as its own process, **independent of the bot**, and
+reads results from disk, so it works whether or not the bot is trading
+(nights, weekends, between sessions). It shows the **cumulative summary
+since inception** (all-time net P&L, win rate, trading days, green/red
+days, best/worst day), a per-day history table, today's trades, any open
+position, and whether the bot is **running right now** (inferred from the
+bot log's freshness — no coupling to the trading process). Start it hands-
+off at login by putting a shortcut to `windows/start_dashboard.cmd` in your
+Startup folder (`shell:startup`); no admin, no scheduled task. Quick
+terminal check: `python dashboard.py --once`.
+
+**Live ticking monitor:** while the bot runs, **http://127.0.0.1:8081**
+(`monitor.py`) serves the live view — position with ticking unrealized
+P&L, momentum state, risk gates, kill-switch ages, refreshing every 2s.
+Served from a daemon thread inside the bot, so it exists only during a
+session (that's why the always-on dashboard above is the one to bookmark).
+Both pages are **read-only by construction** (GET-only, every write method
+rejected), localhost-bound by default, stdlib and self-contained — no
+dependencies, no CDN. Ports configurable via `DASHBOARD_PORT` / `MONITOR_PORT`
+(`0` disables).
 
 ---
 
